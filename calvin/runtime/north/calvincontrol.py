@@ -27,6 +27,7 @@ from urlparse import urlparse
 
 _log = get_logger(__name__)
 
+uuid_re = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 control_api_doc = ""
 # control_api_doc += \
@@ -63,7 +64,7 @@ control_api_doc += \
         "uri": "calvinip://<address>:<port>"
     }
 """
-re_get_node = re.compile(r"GET /node/((NODE_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\sHTTP/1")
+re_get_node = re.compile(r"GET /node/(NODE_" + uuid_re + "|" + uuid_re + ")\sHTTP/1")
 
 control_api_doc += \
 """
@@ -93,7 +94,7 @@ control_api_doc += \
          "name": <name or id of this application>
     }
 """
-re_get_application = re.compile(r"GET /application/((APP_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\sHTTP/1")
+re_get_application = re.compile(r"GET /application/(APP_" + uuid_re + "|" + uuid_re + ")\sHTTP/1")
 
 control_api_doc += \
 """
@@ -101,7 +102,7 @@ control_api_doc += \
     Stop application (only applications launched from this node)
     Response: {"result: "OK"}
 """
-re_del_application = re.compile(r"DELETE /application/((APP_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\sHTTP/1")
+re_del_application = re.compile(r"DELETE /application/(APP_" + uuid_re + "|" + uuid_re + ")\sHTTP/1")
 
 control_api_doc += \
 """
@@ -138,7 +139,7 @@ control_api_doc += \
         "outports": list of outports
      }
 """
-re_get_actor = re.compile(r"GET /actor/((ACTOR_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\sHTTP/1")
+re_get_actor = re.compile(r"GET /actor/(ACTOR_" + uuid_re + "|" + uuid_re + ")\sHTTP/1")
 
 control_api_doc += \
 """
@@ -146,7 +147,7 @@ control_api_doc += \
     Delete actor
     Response: {"result": "OK"}
 """
-re_del_actor = re.compile(r"DELETE /actor/((ACTOR_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\sHTTP/1")
+re_del_actor = re.compile(r"DELETE /actor/(ACTOR_" + uuid_re + "|" + uuid_re + ")\sHTTP/1")
 
 control_api_doc += \
 """
@@ -154,7 +155,7 @@ control_api_doc += \
     Some actor store statistics on inputs and outputs, this reports these. Not always present.
     Repsonse: Depends on actor
 """
-re_get_actor_report = re.compile(r"GET /actor/((ACTOR_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/report\sHTTP/1")
+re_get_actor_report = re.compile(r"GET /actor/(ACTOR_" + uuid_re + "|" + uuid_re + ")/report\sHTTP/1")
 
 control_api_doc += \
 """
@@ -163,7 +164,49 @@ control_api_doc += \
     Body: {"peer_node_id": <node-id>}
     Response: {"result": "ACK"}
 """
-re_post_actor_migrate = re.compile(r"POST /actor/((ACTOR_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/migrate\sHTTP/1")
+re_post_actor_migrate = re.compile(r"POST /actor/(ACTOR_" + uuid_re + "|" + uuid_re + ")/migrate\sHTTP/1")
+
+control_api_doc += \
+"""
+    POST /application/{application-id}/migrate
+    Apply deployment requirements to actors of an application and initiate migration of actors accordingly
+    Body:
+    {
+        "reqs": 
+           {"groups": {"<group 1 name>": ["<actor instance 1 name>", ...]},  # TODO not yet implemented
+            "requirements": {
+                "<actor instance 1 name>": [ {"op": "<mathing rule name>", 
+                                              "kwargs": {<rule param key>: <rule param value>, ...},
+                                              "type": either "+" or "-" for set section operation or set removal, respectively
+                                              }, ...
+                                           ], 
+                ...
+                            }
+           }
+    
+    The matching rules are implemented as plugg-ins, intended to be extended. The type "+" is anding rules togheter or
+    rather taking the section between all rules return possible nodes. The type "-" is explicitly removing the matching
+    rule's returned nodes from the set of possible nodes. Note that only negative rules will result in no possible nodes,
+    i.e. no implied all but these.
+    
+    A special matching rule exist, to first form a union between matching rules, i.e. alternative matches. This is useful
+    for e.g. alternative namings, ownerships or specifying either of two specific nodes.
+    {"op": "union_group",
+     "requirements": [list as above of matching rules but without type key]
+     "type": "+"
+    }
+
+    Other matching rules available is current_node, all_nodes and node_attr_match which takes an index param which is
+    attribute formatted, e.g.
+    
+        {"op": "node_attr_match", 
+         "kwargs": {"index": ["node_name", {"organization": "org.testexample", "name": "testNode1"}]}
+         "type": "+"
+        }
+
+    Response: {"result": "ACK"/"NACK"}
+"""
+re_post_application_requirements = re.compile(r"POST /application/((APP_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/migrate\sHTTP/1")
 
 control_api_doc += \
 """
@@ -171,14 +214,14 @@ control_api_doc += \
     DEPRECATED. Disables an actor
     Response: {"result": "OK"}
 """
-re_post_actor_disable = re.compile(r"POST /actor/((ACTOR_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/disable\sHTTP/1")
+re_post_actor_disable = re.compile(r"POST /actor/(ACTOR_" + uuid_re + "|" + uuid_re + ")/disable\sHTTP/1")
 
 # control_api_doc += \
 """
     GET /actor/{actor-id}/port/{port-id}
     Broken. Get information on port {port-id} of actor {actor-id}
 """
-re_get_port = re.compile(r"GET /actor/((ACTOR_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/port/((PORT_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\sHTTP/1")
+re_get_port = re.compile(r"GET /actor/(ACTOR_" + uuid_re + "|" + uuid_re + ")/port/(PORT_" + uuid_re + "|" + uuid_re + ")\sHTTP/1")
 
 control_api_doc += \
 """
@@ -260,7 +303,7 @@ control_api_doc += \
     }
     Response: {"result": "true"}
 """
-re_post_index = re.compile(r"POST /index/([0-9a-zA-Z\.\-/]*)\sHTTP/1")
+re_post_index = re.compile(r"POST /index/([0-9a-zA-Z\.\-/_]*)\sHTTP/1")
 
 control_api_doc += \
 """
@@ -272,7 +315,7 @@ control_api_doc += \
     }
     Response: {"result": "true"}
 """
-re_delete_index = re.compile(r"DELETE /index/([0-9a-zA-Z\.\-/]*)\sHTTP/1")
+re_delete_index = re.compile(r"DELETE /index/([0-9a-zA-Z\.\-/_]*)\sHTTP/1")
 
 control_api_doc += \
 """
@@ -280,7 +323,7 @@ control_api_doc += \
     Fetch values under index key
     Response: {"result": <list of strings>}
 """
-re_get_index = re.compile(r"GET /index/([0-9a-zA-Z\.\-/]*)\sHTTP/1")
+re_get_index = re.compile(r"GET /index/([0-9a-zA-Z\.\-/_]*)\sHTTP/1")
 
 control_api_doc += \
 """
@@ -339,6 +382,7 @@ class CalvinControl(object):
             (re_del_actor, self.handle_del_actor),
             (re_get_actor_report, self.handle_get_actor_report),
             (re_post_actor_migrate, self.handle_actor_migrate),
+            (re_post_application_requirements, self.handle_application_requirements),
             (re_post_actor_disable, self.handle_actor_disable),
             (re_get_port, self.handle_get_port),
             (re_post_connect, self.handle_connect),
@@ -351,7 +395,7 @@ class CalvinControl(object):
             (re_get_index, self.handle_get_index),
             (re_options, self.handle_options)
         ]
-        self.server = server_connection.ServerProtocolFactory(self.handle_request, "raw")
+        self.server = server_connection.ServerProtocolFactory(self.handle_request, "http")
         self.server.start(self.host, self.port)
 
     def stop(self):
@@ -368,18 +412,15 @@ class CalvinControl(object):
 
         for handle, connection in self.connections.items():
             if connection.data_available:
-                data = connection.data_get()
+                command, headers, data = connection.data_get()
                 found = False
                 for route in self.routes:
-                    match = route[0].match(data)
+                    match = route[0].match(command)
                     if match:
-                        parts = data.split("\r\n\r\n")
-                        hdr_data = parts[0]
-                        http_data = parts[1]
-                        if http_data:
-                            http_data = json.loads(http_data)
+                        if data:
+                            data = json.loads(data)
                         _log.debug("Calvin control handles:\n%s\n---------------" % data)
-                        route[1](handle, connection, match, http_data, hdr_data)
+                        route[1](handle, connection, match, data, headers)
                         found = True
                         break
 
@@ -502,7 +543,20 @@ class CalvinControl(object):
     def actor_migrate_cb(self, handle, connection, status, *args, **kwargs):
         """ Migrate actor respons
         """
-        self.send_response(handle, connection, json.dumps({'result': status}))
+        self.send_response(handle, connection,
+                           json.dumps({'result': str(status) if isinstance(status, Exception) else status}))
+
+    def handle_application_requirements(self, handle, connection, match, data):
+        """ Apply application deployment requirements
+            to actors of an application and initiate migration of actors accordingly
+        """
+        self.node.app_manager.deployment_add_requirements(match.group(1), data['reqs'], 
+                        cb=CalvinCB(func=self.handle_application_requirements_cb, handle=handle, connection=connection))
+
+    def handle_application_requirements_cb(self, handle, connection, *args, **kwargs):
+        self.send_response(handle, connection,
+                           json.dumps({'result': kwargs['status'],
+                                       'placement': kwargs['placement'] if 'placement' in kwargs else {}}))
 
     def handle_actor_disable(self, handle, connection, match, data, hdr):
         self.node.am.disable(match.group(1))
@@ -559,7 +613,6 @@ class CalvinControl(object):
         self.send_response(handle, connection, json.dumps({'result': 'OK'}))
 
     def handle_deploy(self, handle, connection, match, data, hdr):
-        print "data: ", data
         app_info, errors, warnings = compiler.compile(
             data["script"], filename=data["name"])
         app_info["name"] = data["name"]
@@ -567,7 +620,7 @@ class CalvinControl(object):
             runtime=None, deployable=app_info, node_info=None, node=self.node)
         app_id = d.deploy()
         self.send_response(
-            handle, connection, json.dumps({'application_id': app_id}))
+            handle, connection, json.dumps({'application_id': app_id, 'actor_map': d.actor_map}))
 
     def handle_quit(self, handle, connection, match, data, hdr):
         self.node.stop()
@@ -631,14 +684,13 @@ class CalvinControl(object):
     def handle_options(self, handle, connection, match, data, hdr):
         """ Handle HTTP OPTIONS requests
         """
-        headers = dict(re.findall(r"(?P<name>.*?): (?P<value>.*?)\r\n", hdr))
         response = "HTTP/1.1 200 OK\n"
 
         """ Copy the content of Access-Control-Request-Headers to the response
         """
-        if 'Access-Control-Request-Headers' in headers:
+        if 'access-control-request-headers' in hdr:
             response += "Access-Control-Allow-Headers: "+ \
-                        headers['Access-Control-Request-Headers']+"\n"
+                        hdr['access-control-request-headers']+"\n"
 
         response += "Content-Length: 0\n" \
                     "Access-Control-Allow-Origin: *\n" \

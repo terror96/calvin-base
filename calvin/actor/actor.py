@@ -323,14 +323,17 @@ class Actor(object):
     # What are the arguments, really?
     def __init__(self, actor_type, name='', allow_invalid_transitions=True, disable_transition_checks=False,
                  disable_state_checks=False, actor_id=None):
-        """Should normally _not_ be overridden in subclasses."""
+        """Should _not_ be overridden in subclasses."""
         super(Actor, self).__init__()
         self._type = actor_type
         self.name = name  # optional: human_readable_name
         self.id = actor_id or calvinuuid.uuid("ACTOR")
-        self._managed = set(('id', 'name'))
-        self.calvinsys = None # CalvinSys(node)
+        self._deployment_requirements = []
+        self._managed = set(('id', 'name', '_deployment_requirements'))
+        self._calvinsys = None
+        self._using = {}
         self.control = calvincontrol.get_calvincontrol()
+        self._migrating_to = None  # During migration while on the previous node set to the next node id
 
         self.inports = {p: actorport.InPort(p, self) for p in self.inport_names}
         self.outports = {p: actorport.OutPort(p, self) for p in self.outport_names}
@@ -372,11 +375,20 @@ class Actor(object):
         pass
 
     @verify_status([STATUS.LOADED])
-    def attach_API(self, api_name, api_factory):
-        """Called during creation of actor with a callable api_factory."""
-        # FIXME: Resolve the required (calvin) APIs and attach them to the actor
-        #        See calvin_node::calvinsys
-        self.calvinsys = api_factory(self)
+    def check_requirements(self):
+        """ Checks that all requirements are available in calvinsys """
+        if hasattr(self, "requires"):
+            for req in self.requires:
+                if not self._calvinsys.has_capability(req):
+                    raise Exception("%s requires %s" % (self.id, req))
+
+    def __getitem__(self, attr):
+        if attr in self._using:
+            return self._using[attr]
+        raise KeyError(attr)
+
+    def use(self, requirement, shorthand):
+        self._using[shorthand] = self._calvinsys.use_requirement(self, requirement)
 
     def __str__(self):
         ip = ""
@@ -430,11 +442,9 @@ class Actor(object):
 
         # If we made it here, all ports are connected
         self.fsm.transition_to(Actor.STATUS.ENABLED)
-        self.calvinsys.events.timer._trigger_loop()
 
-        # # Trigger us
-        # _log.debug("Connected trigger %s" % self._type)
-        # self.calvinsys._node.sched.trigger_loop(actor_ids=[self.id] + self.local_neighbors)
+        # Actor enabled, inform scheduler
+        self._calvinsys.scheduler_wakeup()
 
     @verify_status([STATUS.ENABLED, STATUS.PENDING])
     def did_disconnect(self, port):
@@ -544,7 +554,8 @@ class Actor(object):
         for port in state['outports']:
             self.outports[port]._set_state(state['outports'][port])
 
-    @verify_status([STATUS.ENABLED])
+    # TODO verify status should only allow reading connections when and after being fully connected (enabled)
+    @verify_status([STATUS.ENABLED, STATUS.READY, STATUS.PENDING])
     def connections(self, node_id):
         c = {'actor_id': self.id, 'actor_name': self.name}
         inports = {}
@@ -576,3 +587,6 @@ class Actor(object):
 
     def events(self):
         return []
+
+    def deployment_add_requirements(self, deploy_reqs, component=None):
+        self._deployment_requirements.extend([dict(r, component=component) for r in deploy_reqs])

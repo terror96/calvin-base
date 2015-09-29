@@ -20,6 +20,7 @@ import importlib
 
 from calvin.utilities import calvinuuid
 from calvin.utilities.calvin_callback import CalvinCB
+from calvin.runtime.south.plugins.async import async
 from calvin.utilities import calvinlogger
 _log = calvinlogger.get_logger(__name__)
 
@@ -39,10 +40,14 @@ class CalvinLink(object):
         self.rt_id = rt_id
         self.peer_id = peer_id
         self.transport = transport
+        # FIXME replies should also be made independent on the link object, 
+        # to handle dying transports losing reply callbacks
         self.replies = old_link.replies if old_link else {}
-        self.tunnels = old_link.tunnels if old_link else {}
         if old_link:
-            old_link.close()
+            # close old link after a period, since might still receive messages on the transport layer
+            # TODO chose the delay based on RTT instead of arbitrary 3 seconds
+            _log.analyze(self.rt_id, "+ DELAYED LINK CLOSE", {})
+            async.DelayedCall(3.0, old_link.close)
 
     def reply_handler(self, payload):
         """ Gets called when a REPLY messages arrives on this link """
@@ -71,21 +76,14 @@ class CalvinLink(object):
         """
         msg['from_rt_uuid'] = self.rt_id
         msg['to_rt_uuid'] = self.peer_id
+        _log.analyze(self.rt_id, "SEND", msg)
         self.transport.send(msg)
 
     def close(self):
         """ Disconnect the transport and hence the link object won't work anymore """
+        _log.analyze(self.rt_id, "+ LINK", {})
         self.transport.disconnect()
 
-    def get_tunnel(self, tunnel_type=None):
-        """get_tunnel return the first tunnel of tunnel_type if exist otherwise None"""
-        if tunnel_type is None:
-            # Currently only support get based on tunnel type
-            return None
-        try:
-            return [t for t in self.tunnels.itervalues() if t.tunnel_type == tunnel_type][0]
-        except:
-            return None
 
 class CalvinNetwork(object):
     """ CalvinNetwork keeps track of and establish all runtime to runtime links, 
@@ -182,6 +180,7 @@ class CalvinNetwork(object):
             if not (uri in self.pending_joins or peer_id in self.pending_joins_by_id or peer_id in self.links):
                 # No simultaneous join detected
                 schema = uri.split(":",1)[0]
+                _log.analyze(self.node.id, "+", {'uri': uri, 'peer_id': peer_id, 'schema': schema, 'transports': self.transports.keys()}, peer_node_id=peer_id)
                 if schema in self.transports.keys():
                     # store we have a pending join and its callback
                     if peer_id:
@@ -189,9 +188,11 @@ class CalvinNetwork(object):
                     if callback:
                         self.pending_joins[uri] = [callback]
                     # Ask the transport plugin to do the join
+                    _log.analyze(self.node.id, "+ TRANSPORT", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
                     self.transports[schema].join(uri)
             else:
                 # We have simultaneous joins
+                _log.analyze(self.node.id, "+ SIMULTANEOUS", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
                 if callback:
                     if peer_id in self.links:
                         # Link was already established, then need to call the callback now
@@ -216,41 +217,41 @@ class CalvinNetwork(object):
         """
         # while a link is pending it is the responsibility of the transport layer, since
         # higher layers don't have any use for it anyway
-        _log.debug("Join finished for (%s, %s) with link: %s" % (peer_id, uri, tp_link))
+        _log.analyze(self.node.id, "+", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
         if tp_link is None:
             # This is a failed join lets send it upwards
             if uri in self.pending_joins:
                 cbs = self.pending_joins.pop(uri)
                 if cbs:
                     for cb in cbs:
-                        cb(status="NACK", uri=uri)
+                        cb(status="NACK", uri=uri, peer_node_id=peer_id)
             return
         # Only support for one RT to RT communication link per peer 
         if peer_id in self.links:
             # Likely simultaneous join requests, use the one requested by the node with highest id
             if is_orginator and self.node.id > peer_id:
                 # We requested it and we have highest node id, hence the one in links is the peer's and we replace it
-                _log.debug("Join finished for (%s, %s) BUT REPLACE since exist" % (peer_id, uri))
+                _log.analyze(self.node.id, "+ REPLACE ORGINATOR", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
                 self.links[peer_id] = CalvinLink(self.node.id, peer_id, tp_link, self.links[peer_id])
             elif is_orginator and self.node.id < peer_id:
                 # We requested it and peer have highest node id, hence the one in links is peer's and we close this new
-                _log.debug("Join finished for (%s, %s) BUT DROPPED since exist" % (peer_id, uri))
+                _log.analyze(self.node.id, "+ DROP ORGINATOR", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
                 tp_link.disconnect()
             elif not is_orginator and self.node.id > peer_id:
                 # Peer requested it and we have highest node id, hence the one in links is ours and we close this new
-                _log.debug("Join finished for (%s, %s) BUT DROPPED since exist" % (peer_id, uri))
+                _log.analyze(self.node.id, "+ DROP", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
                 tp_link.disconnect()
             elif not is_orginator and self.node.id < peer_id:
                 # Peer requested it and peer have highest node id, hence the one in links is ours and we replace it
-                _log.debug("Join finished for (%s, %s) BUT REPLACE since exist" % (peer_id, uri))
+                _log.analyze(self.node.id, "+ REPLACE", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
                 self.links[peer_id] = CalvinLink(self.node.id, peer_id, tp_link, self.links[peer_id])
         else:
             # No simultaneous join detected, just add the link
-            _log.debug("Join finished for (%s, %s) inserted in links" % (peer_id, uri))
+            _log.analyze(self.node.id, "+ INSERT", {'uri': uri, 'peer_id': peer_id}, peer_node_id=peer_id)
             self.links[peer_id] = CalvinLink(self.node.id, peer_id, tp_link)
 
         # Find and call any callbacks registered for the uri or peer id
-        _log.debug("peer_id: %s, uri: %s\npending_joins_by_id: %s\npending_joins: %s" % (peer_id, 
+        _log.debug("%s: peer_id: %s, uri: %s\npending_joins_by_id: %s\npending_joins: %s" % (self.node.id, peer_id, 
                                                                                          uri, 
                                                                                          self.pending_joins_by_id, 
                                                                                          self.pending_joins))
@@ -260,13 +261,13 @@ class CalvinNetwork(object):
                 cbs = self.pending_joins.pop(peer_uri)
                 if cbs:
                     for cb in cbs:
-                        cb(status="ACK", uri=peer_uri)
+                        cb(status="ACK", uri=peer_uri, peer_node_id=peer_id)
 
         if uri in self.pending_joins:
             cbs = self.pending_joins.pop(uri)
             if cbs:
                 for cb in cbs:
-                    cb(status="ACK", uri=uri)
+                    cb(status="ACK", uri=uri, peer_node_id=peer_id)
 
         return
 
@@ -285,14 +286,14 @@ class CalvinNetwork(object):
         """
         if peer_id in self.links:
             return True
-        _log.debug("Request for rt to rt (%s) link need to check storage" % (peer_id))
+        _log.analyze(self.node.id, "+ CHECK STORAGE", {}, peer_node_id=peer_id)
         # We don't have the peer, let's ask for it in storage
         self.node.storage.get_node(peer_id, CalvinCB(self.link_request_finished, callback=callback))
         return False
 
     def link_request_finished(self, key, value, callback):
         """ Called by storage when the node is (not) found """
-        _log.debug("Request for rt to rt link storage returned (%s, %s)" % (key, value))
+        _log.analyze(self.node.id, "+", {'value': value}, peer_node_id=key)
         # Test if value is None or False indicating node does not currently exist in storage
         if not value:
             # the peer_id did not exist in storage
@@ -300,14 +301,18 @@ class CalvinNetwork(object):
             return
 
         # join the peer node
-        _log.debug("Send join request for (%s, %s) CB: %s" % (key, value, callback))
         self.join([value['uri']], callback, [key])
 
     def peer_disconnected(self, link, rt_id, reason):
-        self.link_remove(rt_id)
+        _log.analyze(self.node.id, "+", {'reason': reason, 
+                                         'links_equal': link == self.links[rt_id].transport if rt_id in self.links else "Gone"},
+                                         peer_node_id=rt_id)
+        if rt_id in self.links and link == self.links[rt_id].transport:
+            self.link_remove(rt_id)
 
     def link_remove(self, peer_id):
         """ Removes a link to peer id """
+        _log.analyze(self.node.id, "+", {}, peer_node_id=peer_id)
         try:
             self.links.pop(peer_id)
         except:

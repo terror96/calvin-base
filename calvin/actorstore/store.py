@@ -22,11 +22,11 @@ import json
 import re
 from types import ModuleType
 
-from calvin.utilities import calconfig
+from calvin.utilities import calvinconfig
 from calvin.utilities.calvinlogger import get_logger
 
 _log = get_logger(__name__)
-_conf = calconfig.get()
+_conf = calvinconfig.get()
 
 #
 # Helpers
@@ -89,9 +89,11 @@ class Store(object):
         """
             Subclass must set 'conf_paths_name' before calling superclass init.
         """
-        abs_path = os.path.dirname(__file__)
-        rel_paths = _conf.get(None, self.conf_paths_name)
-        self._MODULE_PATHS = [os.path.join(abs_path, path) for path in rel_paths]
+        base_path = os.path.dirname(__file__)
+        # paths = [p for p in _conf.get('global', self.conf_paths_name) if not os.path.isabs(p)]
+        # abs_paths = [p for p in _conf.get('global', self.conf_paths_name) if os.path.isabs(p)]
+        paths = _conf.get('global', self.conf_paths_name)
+        self._MODULE_PATHS = [os.path.join(base_path, p) if not os.path.isabs(p) else p for p in paths]
         self._MODULE_CACHE = {}
 
 
@@ -190,6 +192,20 @@ class ActorStore(Store):
         self.update()
 
 
+    def load_from_path(self, path):
+        actor_type, _  = os.path.splitext(os.path.basename(path))
+        return self.load_actor(actor_type, path)
+
+
+    def load_actor(self, actor_type, actor_path):
+        actor_class = self._load_pyclass(actor_type, actor_path)
+        if actor_class:
+            inports, outports = self._gather_ports(actor_class)
+            actor_class.inport_names = inports
+            actor_class.outport_names = outports
+        return actor_class
+
+
     def lookup(self, qualified_name):
         """
         Look up actor using qualified_name, e.g. foo.bar.Actor
@@ -205,11 +221,8 @@ class ActorStore(Store):
         for path in self.paths_for_module(namespace):
             # Primitives has precedence over components
             actor_path = os.path.join(path, actor_type + '.py')
-            actor_class = self._load_pyclass(actor_type, actor_path)
+            actor_class = self.load_actor(actor_type, actor_path)
             if actor_class:
-                inports, outports = self._gather_ports(actor_class)
-                actor_class.inport_names = inports
-                actor_class.outport_names = outports
                 return (True, True, actor_class)
         for path in self.paths_for_module(namespace):
             actor_path = os.path.join(path, actor_type + '.comp')
@@ -236,7 +249,7 @@ class ActorStore(Store):
             elif dest is doctext:
                 line = line.strip()
                 if line:
-                    dest.append(line.strip())
+                    dest.append(line)
                 continue
 
             if dest in [inputs, outputs]:
@@ -376,7 +389,7 @@ class DocumentationStore(ActorStore):
             'ns': namespace, 'name': name,
             'type': 'actor',
             'short_desc': doctext[0],
-            'long_desc': '\n'.join(doctext[2:]),
+            'long_desc': '\n'.join(doctext[1:]),
             'args': self._get_args(actor_class),
             'inputs': inputs,
             'outputs': outputs,

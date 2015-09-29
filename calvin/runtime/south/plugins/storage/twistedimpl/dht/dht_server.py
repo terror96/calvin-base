@@ -25,7 +25,9 @@ from calvin.runtime.south.plugins.storage.twistedimpl.dht.append_server import A
 from calvin.runtime.south.plugins.storage.twistedimpl.dht.service_discovery_ssdp import SSDPServiceDiscovery
 from calvin.runtime.north.plugins.storage.storage_base import StorageBase
 from calvin.utilities import calvinlogger
+from calvin.utilities import calvinconfig
 
+_conf = calvinconfig.get()
 _log = calvinlogger.get_logger(__name__)
 
 
@@ -132,9 +134,12 @@ class AutoDHTServer(StorageBase):
         self._ssdps = None
         self._started = False
 
-    def start(self, iface='', network='ALL', bootstrap=None, cb=None):
+    def start(self, iface='', network=None, bootstrap=None, cb=None):
         if bootstrap is None:
             bootstrap = []
+
+        if network is None:
+            network = _conf.get_in_order("dht_network_filter", "ALL")
 
         self.dht_server = ServerApp(AppendServer)
         ip, port = self.dht_server.start(iface=iface)
@@ -145,17 +150,31 @@ class AutoDHTServer(StorageBase):
         self._ssdps = SSDPServiceDiscovery(iface)
         dlist += self._ssdps.start()
 
-        _log.debug("%s %s:%s" % (self, ip, port))
+        _log.debug("Register service %s %s:%s" % (network, ip, port))
         self._ssdps.register_service(network, ip, port)
+
+        _log.debug("Set client filter %s" % (network))
+        self._ssdps.set_client_filter(network)
 
         start_cb = defer.Deferred()
 
         def bootstrap_proxy(addrs):
-            _log.debug("** proxy %s" % repr(addrs))
-            self.dht_server.bootstrap(addrs)
-            if not self._started:
-                reactor.callLater(.2, start_cb.callback, True)
+            def started(args):
+                _log.debug("DHT Started %s" % (args))
+                if not self._started:
+                    reactor.callLater(.2, start_cb.callback, True)
+                if cb:
+                    reactor.callLater(.2, cb, True)
                 self._started = True
+
+            def failed(args):
+                _log.debug("DHT failed to bootstrap %s" % (args))
+                #reactor.callLater(.5, bootstrap_proxy, addrs)
+
+            _log.debug("Trying to bootstrap with %s" % (repr(addrs)))
+            d = self.dht_server.bootstrap(addrs)
+            d.addCallback(started)
+            d.addErrback(failed)
 
         def start_msearch(args):
             _log.debug("** msearch %s args: %s" % (self, repr(args)))
@@ -164,9 +183,6 @@ class AutoDHTServer(StorageBase):
         # Wait until servers all listen
         dl = defer.DeferredList(dlist)
         dl.addBoth(start_msearch)
-
-        if cb:
-            start_cb.addBoth(cb)
 
         return start_cb
 
