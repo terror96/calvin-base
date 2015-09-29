@@ -20,7 +20,7 @@ import sys
 import trace
 import logging
 
-from calvin.calvinsys import CalvinSys
+from calvin.calvinsys import Sys as CalvinSys
 
 from calvin.runtime.north import actormanager
 from calvin.runtime.north import appmanager
@@ -32,12 +32,18 @@ from calvin.runtime.north.calvin_proto import CalvinProto
 from calvin.runtime.north.portmanager import PortManager
 from calvin.runtime.south.monitor import Event_Monitor
 from calvin.runtime.south.plugins.async import async
+from calvin.utilities.attribute_resolver import AttributeResolver
 
 from calvin.utilities.calvin_callback import CalvinCB
 from calvin.utilities import calvinuuid
 from calvin.utilities.calvinlogger import get_logger
-
 _log = get_logger(__name__)
+
+
+def addr_from_uri(uri):
+    _, host = uri.split("://")
+    addr, _ = host.split(":")
+    return addr
 
 
 class Node(object):
@@ -53,7 +59,11 @@ class Node(object):
         super(Node, self).__init__()
         self.uri = uri
         self.control_uri = control_uri
-        self.attributes = attributes
+        try:
+            self.attributes = AttributeResolver(attributes)
+        except:
+            _log.exception("Attributes not correct, uses empty attribute!")
+            self.attributes = AttributeResolver(None)
         self.id = calvinuuid.uuid("NODE")
         self.monitor = Event_Monitor()
         self.am = actormanager.ActorManager(self)
@@ -62,16 +72,19 @@ class Node(object):
         self.sched = _scheduler(self, self.am, self.monitor)
         self.control.start(node=self, uri=control_uri)
         self.async_msg_ids = {}
-        self.storage = storage.Storage()
-        self.storage.start()
+        self._calvinsys = CalvinSys(self)
+
+        # Default will multicast and listen on all interfaces
+        # TODO: be able to specify the interfaces
+        # @TODO: Store capabilities
+        self.storage = storage.Storage(self)
+
         self.network = CalvinNetwork(self)
         self.proto = CalvinProto(self, self.network)
         self.pm = PortManager(self, self.proto)
         self.app_manager = appmanager.AppManager(self)
         # The initialization that requires the main loop operating is deferred to start function
-        # FIXME: Don't use delayed call in calvin-tiny
         async.DelayedCall(0, self.start)
-        # self.start()
 
     def insert_local_reply(self):
         msg_id = calvinuuid.uuid("LMSG")
@@ -129,10 +142,15 @@ class Node(object):
             self.app_manager.add(app_id, app_name, actor_id)
         return actor_id
 
-    def calvinsys(self, actor):
+    def deployment_control(self, app_id, actor_id, deploy_args):
+        """ Updates an actor's deployment """
+        self.am.deployment_control(app_id, actor_id, deploy_args)
+
+    def calvinsys(self):
         """Return a CalvinSys instance"""
         # FIXME: We still need to sort out actor requirements vs. node capabilities and user permissions.
-        return CalvinSys(actor, self)
+        # @TODO: Write node capabilities to storage
+        return self._calvinsys
 
     #
     # Event loop
@@ -147,6 +165,8 @@ class Node(object):
         # FIXME hardcoded which transport and encoder plugin we use, should be based on
         self.network.register(['calvinip'], ['json'])
         self.network.start_listeners([self.uri])
+        # Start storage after network, proto etc since storage proxy expects them
+        self.storage.start()
         self.storage.add_node(self)
 
     def stop(self, callback=None):
@@ -154,6 +174,7 @@ class Node(object):
             _log.debug(args)
             self.sched.stop()
             self.control.stop()
+
         def deleted_node(*args, **kwargs):
             self.storage.stop(stopped)
         self.storage.delete_node(self, cb=deleted_node)
@@ -163,6 +184,7 @@ def create_node(uri, control_uri, attributes=None):
     n = Node(uri, control_uri, attributes)
     n.run()
     _log.info('Quitting node "%s"' % n.uri)
+
 
 def create_tracing_node(uri, control_uri, attributes=None):
     """
@@ -193,3 +215,4 @@ def start_node(uri, control_uri, trace_exec=False, attributes=None):
     p = Process(target=_create_node, args=(uri, control_uri, attributes))
     p.daemon = True
     p.start()
+    return p

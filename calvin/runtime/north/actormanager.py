@@ -51,6 +51,7 @@ class ActorManager(object):
         # When renewing (e.g. after migrate) apply the args from the state
         # instead of any directly supplied
         _log.debug("class: %s args: %s state: %s", actor_type, args, state)
+        _log.analyze(self.node.id, "+", {'actor_type': actor_type, 'state': state})
 
         try:
             if state:
@@ -88,8 +89,8 @@ class ActorManager(object):
         try:
             # Create a 'bare' instance of the actor
             a = class_(actor_type, actor_id)
-            # Hand over a CalvinSys factory method to the actor.
-            a.attach_API("calvinsys", self.node.calvinsys)
+            a._calvinsys = self.node.calvinsys()
+            a.check_requirements()
         except Exception as e:
             _log.exception("")
             _log.error("The actor %s(%s) can't be instantiated." % (actor_type, class_.__init__))
@@ -108,7 +109,7 @@ class ActorManager(object):
             a.init(**args)
             a.setup_complete()
         except Exception as e:
-            #_log.exception(e)
+            _log.exception(e)
             raise(e)
         return a
 
@@ -132,6 +133,7 @@ class ActorManager(object):
         a = self.actors[actor_id]
         a.will_end()
         self.node.pm.remove_ports_of_actor(a)
+        # @TOOD - insert callback here
         self.node.storage.delete_actor(actor_id)
         del self.actors[actor_id]
 
@@ -150,9 +152,18 @@ class ActorManager(object):
     def migrate(self, actor_id, node_id, callback = None):
         """ Migrate an actor actor_id to peer node node_id """
         if actor_id not in self.actors:
+            # Can only migrate actors from our node
+            if callback:
+                callback(status="NACK")
+            return
+        if node_id == self.node.id:
+            # No need to migrate to ourself
+            if callback:
+                callback(status="ACK")
             return
 
         actor = self.actors[actor_id]
+        actor._migrating_to = node_id
         actor.will_migrate()
         actor_type = actor._type
         ports = actor.connections(self.node.id)

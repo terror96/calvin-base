@@ -18,6 +18,12 @@
 import argparse
 import requests
 import json
+import calvin.utilities.utils as utils
+import os
+from calvin.utilities.calvinlogger import get_logger
+import logging
+
+_log = get_logger(__name__)
 
 
 def jsonprint(s):
@@ -50,30 +56,37 @@ def get_node_control_uri(control_uri, node_id):
     return nodeinfo.get("control_uri")
 
 
-def get_node_with_attribute(control_uri, attribute):
-    import random
-    nodes = get_nodes_with_attribute(control_uri, attribute)
-
-    node = None
-    # pick one (with a control uri)
-    while nodes:
-        node_id = random.choice(nodes)
-        nodes.remove(node_id)
-        other_control_uri = get_node_control_uri(control_uri, node_id)
-        if other_control_uri:
-            node = other_control_uri
-            break
-    return node
-
+def requirements_file(path):
+    """ Reads in a requirements file of JSON format with the structure:
+        {<actor_name>: [(<req_op>, <req_args>), ...], ...}
+        
+        Needs to be called after the initial deployment to get the actor_ids
+    """
+    reqs = None
+    try:
+        reqs = json.load(open(path,'r'))
+    except:
+        _log.exception("Failed JSON file")
+    if not reqs or not isinstance(reqs, dict):
+        _log.error("Failed loading deployment requirements file %s" % path)
+        return {}
+    return reqs
 
 def control_deploy(args):
     data = {"name": args.script.name, "script": args.script.read()}
-    if args.attr:
-        node = get_node_with_attribute(args.node, args.attr)
-    else:
-        node = args.node
-    return requests.post(node + "/deploy", data=json.dumps(data))
-
+    node = args.node
+    response_http = requests.post(node + "/deploy", data=json.dumps(data))
+    response = json.loads(response_http.text)
+    if "application_id" in response and args.reqs:
+        reqs = requirements_file(args.reqs)
+        if reqs:
+            result = utils.add_requirements(utils.RT(node), response["application_id"], reqs)
+        if result and 'result' in result and result['result'] == 'NACK':
+            _log.error("Applying deployment requirement from file %s failed" % args.reqs)
+            print ("Applying deployment requirement from file %s failed" % args.reqs)
+        elif result and 'placement' in result:
+            _log.debug("Succeeded with applying deployment requirements %s\n" % result['placement'])
+    return response_http
 
 def control_actors(args):
     if args.cmd == 'list':
@@ -136,10 +149,11 @@ def parse_args():
 
     # parser for deploy
     cmd_deploy = cmdparsers.add_parser('deploy', help="deploy script to node")
-    cmd_deploy.add_argument("script", metavar="<calvin script>", type=file,
+    cmd_deploy.add_argument("script", metavar="<calvin script>", type=argparse.FileType('r'),
                             help="script to be deployed")
-    cmd_deploy.add_argument('-a', '--attr', metavar="<attribute>", type=str, dest="attr",
-                               help="Will deploy script to a random node with the given attribute")
+    cmd_deploy.add_argument('--reqs', metavar='<reqs>', type=str,
+                           help='deploy script, currently JSON coded data file',
+                           dest='reqs')
     cmd_deploy.set_defaults(func=control_deploy)
 
     # parsers for actor commands

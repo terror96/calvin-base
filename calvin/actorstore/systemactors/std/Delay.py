@@ -29,27 +29,36 @@ class Delay(Actor):
     @manage(['delay'])
     def init(self, delay=0.1):
         self.delay = delay
+        self.timers = []
         self.setup()
 
     def setup(self):
-        self.timer = self.calvinsys.events.timer.repeat(self.delay)
+        self.use('calvinsys.events.timer', shorthand='timer')
 
     def will_migrate(self):
-        self.timer.cancel()
+        raise Exception("std.Delay can not migrate!")
 
     def did_migrate(self):
-        self.setup()
+        raise Exception("std.Delay can not migrate!")
 
-    @condition(['token'], ['token'])
-    @guard(lambda self, _: self.timer and self.timer.triggered)
-    def next(self, input):
-        self.timer.ack()
-        return ActionResult(production=(input, ))
+    @condition(['token'])
+    def tokenAvailable(self, input):
+        self.timers.append({'token': input, 'timer': self['timer'].once(self.delay)})
+        return ActionResult()
 
-    action_priority = (next,)
+    @condition([], ['token'])
+    @guard(lambda self: len(self.timers) > 0 and self.timers[0]['timer'].triggered)
+    def timeout(self):
+        o = self.timers.pop(0)
+        o['timer'].ack()
+        return ActionResult(production=(o['token'], ))
 
-    test_args = []
+    action_priority = (timeout, tokenAvailable)
+    requires = ['calvinsys.events.timer']
 
+    test_args = [1]
+
+    # Test that two tokens are consumed without any output
     test_set = [
         {
             'in': {'token': [r]},
@@ -57,18 +66,12 @@ class Delay(Actor):
         } for r in range(3)
     ]
 
+    # Trigger the timers one at a time and check that the previously inserted tokens
+    # are genererated in order, one at a time.
     test_set += [
         {
-            'setup': [lambda self: self.timer.trigger()],
+            'setup': [lambda self: self.timers[0]['timer'].trigger()],
             'in': {'token': []},
-            'out': {'token': [r]}
+            'out': {'token': [r]},
         } for r in range(3)
-    ]
-
-    test_set += [
-        {
-            'setup': [lambda self: self.timer.trigger()],
-            'in': {'token': ['a']},
-            'out': {'token': ['a']}
-        }
     ]

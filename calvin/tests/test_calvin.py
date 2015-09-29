@@ -14,18 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
 from calvin.Tools import cscompiler as compiler
 from calvin.Tools import deployer
 import time
 import multiprocessing
-from calvin.utilities import calconfig
+from calvin.utilities import calvinconfig
 from calvin.utilities import utils
 from calvin.utilities.nodecontrol import dispatch_node
+from calvin.utilities.attribute_resolver import format_index_string
 import pytest
+from calvin.utilities import calvinlogger
 
-_conf = calconfig.get()
 
+_log = calvinlogger.get_logger(__name__)
+_conf = calvinconfig.get()
 
 def actual_tokens(rt, actor_id):
     return utils.report(rt, actor_id)
@@ -56,50 +60,119 @@ def expected_tokens(rt, actor_id, src_actor_type):
 runtime = None
 runtimes = []
 peerlist = []
+kill_peers = True
 
 def setup_module(module):
     global runtime
     global runtimes
     global peerlist
+    global kill_peers
+    ip_addr = None
 
-    localhost = "calvinip://127.0.0.1:5000", "http://localhost:5001"
-    remotehosts = [("calvinip://127.0.0.1:%d" % d, "http://localhost:%d" % (d+1)) for d in range(5002, 5005, 2)]
-    # remotehosts = [("calvinip://127.0.0.1:5002", "http://localhost:5003")]
-
-    for host in remotehosts:
-        runtimes += [dispatch_node(host[0], host[1])]
-
-    runtime = dispatch_node(localhost[0], localhost[1])
-
-    time.sleep(.1)
-
-    # FIXME When storage up and running peersetup not needed, but still useful during testing
-    utils.peer_setup(runtime, [i[0] for i in remotehosts])
-
-    time.sleep(0.5)
-    """
-
-    # FIXME Does not yet support peerlist
     try:
-        self.peerlist = peerlist(
-            self.runtime, self.runtime.id, len(remotehosts))
+        ip_addr = os.environ["CALVIN_TEST_IP"]
+        purpose = os.environ["CALVIN_TEST_UUID"]
+    except KeyError:
+        pass
 
-        # Make sure all peers agree on network
-        [peerlist(self.runtime, p, len(self.runtimes)) for p in self.peerlist]
-    except:
-        self.peerlist = []
-    """
-    peerlist = [rt.id for rt in runtimes]
+    if ip_addr:
+        remote_node_count = 2
+        kill_peers = False
+        test_peers = None
+
+
+        import socket
+        ports=[]
+        for a in range(2):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(('', 0))
+            addr = s.getsockname()
+            ports.append(addr[1])
+            s.close()
+
+        runtime,_ = dispatch_node("calvinip://%s:%s" % (ip_addr, ports[0]), "http://%s:%s" % (ip_addr, ports[1]))
+
+        _log.debug("First runtime started, control http://%s:%s, calvinip://%s:%s" % (ip_addr, ports[1], ip_addr, ports[0]))
+
+        interval = 0.5
+        for retries in range(1,20):
+            time.sleep(interval)
+            _log.debug("Trying to get test nodes for 'purpose' %s" % purpose)
+            test_peers = utils.get_index(runtime, format_index_string({'node_name':
+                                                                         {'organization': 'com.ericsson',
+                                                                          'purpose': purpose}
+                                                                      }))
+            if not test_peers is None and not test_peers["result"] is None and \
+                    len(test_peers["result"]) == remote_node_count:
+                test_peers = test_peers["result"]
+                break
+
+        if test_peers is None or len(test_peers) != remote_node_count:
+            _log.debug("Failed to find all remote nodes within time, peers = %s" % test_peers)
+            raise Exception("Not all nodes found dont run tests, peers = %s" % test_peers)
+
+        test_peer2_id = test_peers[0]
+        test_peer2 = utils.get_node(runtime, test_peer2_id)
+        if test_peer2:
+            runtime2 = utils.RT(test_peer2["control_uri"])
+            runtime2.id = test_peer2_id
+            runtime2.uri = test_peer2["uri"]
+            runtimes.append(runtime2)
+        test_peer3_id = test_peers[1]
+        if test_peer3_id:
+            test_peer3 = utils.get_node(runtime, test_peer3_id)
+            if test_peer3:
+                runtime3 = utils.RT(test_peer3["control_uri"])
+                runtime3.id = test_peer3_id
+                runtime3.uri = test_peer3["uri"]
+                runtimes.append(runtime3)
+    else:
+        try:
+            ip_addr = os.environ["CALVIN_TEST_LOCALHOST"]
+        except:
+            import socket
+            ip_addr = socket.gethostbyname(socket.gethostname())
+        localhost = "calvinip://%s:5000" % (ip_addr,), "http://localhost:5001"
+        remotehosts = [("calvinip://%s:%d" % (ip_addr, d), "http://localhost:%d" % (d+1)) for d in range(5002, 5005, 2)]
+        # remotehosts = [("calvinip://127.0.0.1:5002", "http://localhost:5003")]
+
+        for host in remotehosts:
+            runtimes += [dispatch_node(host[0], host[1])[0]]
+
+        runtime, _ = dispatch_node(localhost[0], localhost[1])
+
+        time.sleep(1)
+
+        # FIXME When storage up and running peersetup not needed, but still useful during testing
+        utils.peer_setup(runtime, [i[0] for i in remotehosts])
+
+        time.sleep(0.5)
+        """
+
+        # FIXME Does not yet support peerlist
+        try:
+            self.peerlist = peerlist(
+                self.runtime, self.runtime.id, len(remotehosts))
+
+            # Make sure all peers agree on network
+            [peerlist(self.runtime, p, len(self.runtimes)) for p in self.peerlist]
+        except:
+            self.peerlist = []
+        """
+
+    peerlist = [rt.control_uri for rt in runtimes]
     print "SETUP DONE ***", peerlist
 
 
 def teardown_module(module):
     global runtime
     global runtimes
+    global kill_peers
 
-    for peer in runtimes:
-        utils.quit(peer)
-        time.sleep(0.2)
+    if kill_peers:
+        for peer in runtimes:
+            utils.quit(peer)
+            time.sleep(0.2)
     utils.quit(runtime)
     time.sleep(0.2)
     for p in multiprocessing.active_children():
@@ -163,6 +236,9 @@ class TestLocalConnectDisconnect(CalvinTestBase):
 
         self.assertListPrefix(expected, actual)
 
+        utils.delete_actor(rt, src)
+        utils.delete_actor(rt, snk)
+
     def testLocalConnectDisconnectSink(self):
         """Testing local connect/disconnect/re-connect on sink"""
 
@@ -182,6 +258,9 @@ class TestLocalConnectDisconnect(CalvinTestBase):
         expected = expected_tokens(rt, src, 'std.CountTimer')
         actual = actual_tokens(rt, snk)
         self.assertListPrefix(expected, actual)
+
+        utils.delete_actor(rt, src)
+        utils.delete_actor(rt, snk)
 
     def testLocalConnectDisconnectSource(self):
         """Testing local connect/disconnect/re-connect on source"""
@@ -203,6 +282,9 @@ class TestLocalConnectDisconnect(CalvinTestBase):
         expected = expected_tokens(rt, src, "std.CountTimer")
         actual = actual_tokens(rt, snk)
         self.assertListPrefix(expected, actual)
+
+        utils.delete_actor(rt, src)
+        utils.delete_actor(rt, snk)
 
     def testLocalConnectDisconnectFilter(self):
         """Testing local connect/disconnect/re-connect on filter"""
@@ -232,6 +314,10 @@ class TestLocalConnectDisconnect(CalvinTestBase):
         actual = actual_tokens(rt, snk)
         self.assertListPrefix(expected, actual)
 
+        utils.delete_actor(rt, src)
+        utils.delete_actor(rt, sum_)
+        utils.delete_actor(rt, snk)
+
     def testTimerLocalSourceSink(self):
         """Testing timer based local source and sink"""
 
@@ -252,6 +338,9 @@ class TestLocalConnectDisconnect(CalvinTestBase):
 
         self.assertListPrefix(expected, actual)
         self.assertTrue(len(actual) > 0)
+
+        utils.delete_actor(rt, src)
+        utils.delete_actor(rt, snk)
 
 
 @pytest.mark.essential
@@ -283,6 +372,10 @@ class TestRemoteConnection(CalvinTestBase):
         assert(len(actual) > 1)
         self.assertListPrefix(expected, actual)
 
+        utils.delete_actor(rt, snk)
+        utils.delete_actor(peer, sum_)
+        utils.delete_actor(rt, src)
+
     def testRemoteSlowPort(self):
         """Testing remote slow port and that token flow control works"""
 
@@ -309,11 +402,16 @@ class TestRemoteConnection(CalvinTestBase):
             for i in range(1,100):
                 yield i
                 yield i
-                
+
         expected = list(_d())
         actual = actual_tokens(rt, snk1)
         assert(len(actual) > 1)
         self.assertListPrefix(expected, actual)
+
+        utils.delete_actor(rt, snk1)
+        utils.delete_actor(peer, alt)
+        utils.delete_actor(rt, src1)
+        utils.delete_actor(rt, src2)
 
     def testRemoteSlowFanoutPort(self):
         """Testing remote slow port with fan out and that token flow control works"""
@@ -343,7 +441,7 @@ class TestRemoteConnection(CalvinTestBase):
             for i in range(1,100):
                 yield i
                 yield i
-                
+
         expected = list(_d())
         actual = actual_tokens(rt, snk1)
         assert(len(actual) > 1)
@@ -353,6 +451,12 @@ class TestRemoteConnection(CalvinTestBase):
         actual = actual_tokens(peer, snk2)
         assert(len(actual) > 1)
         self.assertListPrefix(expected, actual)
+
+        utils.delete_actor(rt, snk1)
+        utils.delete_actor(peer, snk2)
+        utils.delete_actor(peer, alt)
+        utils.delete_actor(rt, src1)
+        utils.delete_actor(rt, src2)
 
 @pytest.mark.essential
 @pytest.mark.slow
@@ -373,7 +477,7 @@ class TestActorMigration(CalvinTestBase):
         utils.connect(rt, snk, 'token', peer_id, sum_, 'integer')
         utils.connect(peer, sum_, 'integer', id_, src, 'integer')
         time.sleep(0.27)
-        
+
         actual_1 = actual_tokens(rt, snk)
         utils.migrate(rt, src, peer_id)
         time.sleep(0.2)
@@ -402,7 +506,7 @@ class TestActorMigration(CalvinTestBase):
         utils.connect(rt, snk, 'token', peer_id, sum_, 'integer')
         utils.connect(peer, sum_, 'integer', peer_id, src, 'integer')
         time.sleep(0.27)
-        
+
         actual_1 = actual_tokens(rt, snk)
         utils.migrate(peer, src, id_)
         time.sleep(0.2)
@@ -467,7 +571,7 @@ class TestActorMigration(CalvinTestBase):
         utils.connect(rt, snk, 'token', peer_id, sum_, 'integer')
         utils.connect(peer, sum_, 'integer', id_, src, 'integer')
         time.sleep(0.27)
-        
+
         actual_1 = actual_tokens(rt, snk)
         utils.migrate(peer, sum_, id_)
         time.sleep(0.2)
@@ -532,7 +636,7 @@ class TestActorMigration(CalvinTestBase):
         utils.connect(rt, snk, 'token', id_, sum_, 'integer')
         utils.connect(rt, sum_, 'integer', id_, src, 'integer')
         time.sleep(0.27)
-        
+
         actual_1 = actual_tokens(rt, snk)
         utils.migrate(rt, sum_, peer_id)
         time.sleep(0.2)
@@ -557,17 +661,19 @@ class TestActorMigration(CalvinTestBase):
         peer1 = self.runtimes[1]
         peer1_id = peer1.id
 
+        time.sleep(0.5)
         snk = utils.new_actor_wargs(rt, 'io.StandardOut', 'snk', store_tokens=1)
         sum_ = utils.new_actor(peer0, 'std.Sum', 'sum')
         src = utils.new_actor(rt, 'std.CountTimer', 'src')
 
         utils.connect(rt, snk, 'token', peer0_id, sum_, 'integer')
+        time.sleep(0.5)
         utils.connect(peer0, sum_, 'integer', id_, src, 'integer')
-        time.sleep(0.27)
-        
+        time.sleep(0.5)
+
         actual_1 = actual_tokens(rt, snk)
         utils.migrate(peer0, sum_, peer1_id)
-        time.sleep(0.2)
+        time.sleep(0.5)
 
         expected = expected_tokens(rt, src, 'std.Sum')
         actual = actual_tokens(rt, snk)
