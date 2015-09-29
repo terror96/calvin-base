@@ -23,7 +23,7 @@ def read_desc(fname):
 
 
 setup(name='calvin',
-      version='0.2',
+      version='0.3',
       url="http://github.com/EricssonResearch/calvin-base",
       license="Apache Software License",
       author="Ericsson Research",
@@ -62,7 +62,7 @@ setup(name='calvin',
           "Topic :: Software Development",
       ],
       extras_require={
-          'testing': ['pytest', 'mock']
+          'testing': ['pytest', 'mock', 'pyserial', 'pytest-twisted']
       },
       entry_points={
           'console_scripts': [

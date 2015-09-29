@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
 import time
 import multiprocessing
@@ -23,6 +24,9 @@ from calvin.Tools import deployer
 import pytest
 from calvin.utilities import utils
 from calvin.utilities.nodecontrol import dispatch_node
+from calvin.utilities.attribute_resolver import format_index_string
+from calvin.utilities import calvinlogger
+_log = calvinlogger.get_logger(__name__)
 
 def absolute_filename(filename):
     import os.path
@@ -31,27 +35,99 @@ def absolute_filename(filename):
 rt1 = None
 rt2 = None
 rt3 = None
+kill_peers = True
 
 def setup_module(module):
     global rt1
     global rt2
     global rt3
-    rt1 = dispatch_node("calvinip://localhost:5000", "http://localhost:5003")
-    rt2 = dispatch_node("calvinip://localhost:5001", "http://localhost:5004")
-    rt3 = dispatch_node("calvinip://localhost:5002", "http://localhost:5005")
-    time.sleep(.4)
-    utils.peer_setup(rt1, ["calvinip://localhost:5001", "calvinip://localhost:5002"])
-    utils.peer_setup(rt2, ["calvinip://localhost:5000", "calvinip://localhost:5002"])
-    utils.peer_setup(rt3, ["calvinip://localhost:5000", "calvinip://localhost:5001"])
-    time.sleep(.4)
+    global kill_peers
+    ip_addr = None
+
+    try:
+        ip_addr = os.environ["CALVIN_TEST_IP"]
+        purpose = os.environ["CALVIN_TEST_UUID"]
+        _log.debug("Running remote tests")
+    except KeyError:
+        _log.debug("Running lcoal test")
+        pass
+
+    if ip_addr:
+        remote_node_count = 2
+        kill_peers = False
+        test_peers = None
+
+        import socket
+        ports=[]
+        for a in range(2):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(('', 0))
+            addr = s.getsockname()
+            ports.append(addr[1])
+            s.close()
+
+        rt1,_ = dispatch_node("calvinip://%s:%s" % (ip_addr, ports[0]), "http://%s:%s" % (ip_addr, ports[1]))
+
+        _log.debug("First runtime started, control http://%s:%s, calvinip://%s:%s" % (ip_addr, ports[1], ip_addr, ports[0]))
+
+        interval = 0.5
+        for retries in range(1,20):
+            time.sleep(interval)
+            _log.debug("Trying to get test nodes for 'purpose' %s" % purpose)
+            test_peers = utils.get_index(rt1, format_index_string({'node_name':
+                                                                    {'organization': 'com.ericsson',
+                                                                     'purpose': purpose}
+                                                                  }))
+            if not test_peers is None and not test_peers["result"] is None and \
+                    len(test_peers["result"]) == remote_node_count:
+                test_peers = test_peers["result"]
+                break
+
+        if test_peers is None or len(test_peers) != remote_node_count:
+            _log.debug("Failed to find all remote nodes within time, peers = %s" % test_peers)
+            raise Exception("Not all nodes found dont run tests, peers = %s" % test_peers)
+
+        _log.debug("All remote nodes found!")
+
+        test_peer2_id = test_peers[0]
+        test_peer2 = utils.get_node(rt1, test_peer2_id)
+        if test_peer2:
+            rt2 = utils.RT(test_peer2["control_uri"])
+            rt2.id = test_peer2_id
+            rt2.uri = test_peer2["uri"]
+        test_peer3_id = test_peers[1]
+        if test_peer3_id:
+            test_peer3 = utils.get_node(rt1, test_peer3_id)
+            if test_peer3:
+                rt3 = utils.RT(test_peer3["control_uri"])
+                rt3.id = test_peer3_id
+                rt3.uri = test_peer3["uri"]
+    else:
+        try:
+            ip_addr = os.environ["CALVIN_TEST_LOCALHOST"]
+        except:
+            import socket
+            ip_addr = socket.gethostbyname(socket.gethostname())
+        rt1,_ = dispatch_node("calvinip://%s:5000" % (ip_addr,), "http://localhost:5003")
+        rt2,_ = dispatch_node("calvinip://%s:5001" % (ip_addr,), "http://localhost:5004")
+        rt3,_ = dispatch_node("calvinip://%s:5002" % (ip_addr,), "http://localhost:5005")
+        time.sleep(.4)
+        utils.peer_setup(rt1, ["calvinip://%s:5001" % (ip_addr,), "calvinip://%s:5002" % (ip_addr, )])
+        utils.peer_setup(rt2, ["calvinip://%s:5000" % (ip_addr,), "calvinip://%s:5002" % (ip_addr, )])
+        utils.peer_setup(rt3, ["calvinip://%s:5000" % (ip_addr,), "calvinip://%s:5001" % (ip_addr, )])
+        time.sleep(.4)
+
 
 def teardown_module(module):
     global rt1
     global rt2
     global rt3
+    global kill_peers
+
     utils.quit(rt1)
-    utils.quit(rt2)
-    utils.quit(rt3)
+    if kill_peers:
+        utils.quit(rt2)
+        utils.quit(rt3)
     time.sleep(0.4)
     for p in multiprocessing.active_children():
         p.terminate()
@@ -74,6 +150,7 @@ class TestConnections(CalvinTestBase):
 
     @pytest.mark.slow
     def testLocalSourceSink(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.CountTimer', 'src')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
 
@@ -85,7 +162,11 @@ class TestConnections(CalvinTestBase):
 
         self.assert_lists_equal(range(1, 10), actual)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt1, snk)
+
     def testMigrateSink(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.CountTimer', 'src')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
 
@@ -98,20 +179,34 @@ class TestConnections(CalvinTestBase):
         actual = utils.report(self.rt2, snk)
         self.assert_lists_equal(range(1, 10), actual)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt2, snk)
+
     def testMigrateSource(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.CountTimer', 'src')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
 
         utils.connect(self.rt1, snk, 'token', self.rt1.id, src, 'integer')
 
-        time.sleep(.4)
+        time.sleep(1)
         utils.migrate(self.rt1, src, self.rt2.id)
-        time.sleep(.6)
 
-        actual = utils.report(self.rt1, snk)
+        interval = 0.5
+        for retries in range(1,5):
+            time.sleep(interval * retries)
+            actual = utils.report(self.rt1, snk)
+            if len(actual) > 10 :
+                break
+
+
         self.assert_lists_equal(range(1, 10), actual)
 
+        utils.delete_actor(self.rt2, src)
+        utils.delete_actor(self.rt1, snk)
+
     def testTwoStepMigrateSinkSource(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.CountTimer', 'src')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
 
@@ -126,7 +221,11 @@ class TestConnections(CalvinTestBase):
         actual = utils.report(self.rt2, snk)
         self.assert_lists_equal(range(1,15), actual, min_length=10)
 
+        utils.delete_actor(self.rt2, src)
+        utils.delete_actor(self.rt2, snk)
+
     def testTwoStepMigrateSourceSink(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.CountTimer', 'src')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
 
@@ -142,11 +241,16 @@ class TestConnections(CalvinTestBase):
         actual = utils.report(self.rt2, snk)
         self.assert_lists_equal(range(1,20), actual, min_length=15)
 
+        utils.delete_actor(self.rt2, src)
+        utils.delete_actor(self.rt2, snk)
+
+
 @pytest.mark.essential
 class TestScripts(CalvinTestBase):
 
     @pytest.mark.slow
     def testInlineScript(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
           src : std.CountTimer()
           snk : io.StandardOut(store_tokens=1, quiet=1)
@@ -161,8 +265,11 @@ class TestScripts(CalvinTestBase):
         actual = utils.report(self.rt1, (snk))
         self.assert_lists_equal(range(1, 20), actual)
 
+        d.destroy()
+
     @pytest.mark.slow
     def testFileScript(self):
+        _log.analyze("TESTRUN", "+", {})
         scriptname = 'test1'
         scriptfile = absolute_filename("scripts/%s.calvin" % (scriptname, ))
         app_info, errors, warnings = compiler.compile_file(scriptfile)
@@ -175,10 +282,13 @@ class TestScripts(CalvinTestBase):
         actual = utils.report(self.rt1, snk)
         self.assert_lists_equal(range(1, 20), actual)
 
+        d.destroy()
+
 
 class TestStateMigration(CalvinTestBase):
 
     def testSimpleState(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
           src : std.CountTimer()
           sum : std.Sum()
@@ -200,6 +310,8 @@ class TestStateMigration(CalvinTestBase):
         expected = [sum(range(i+1)) for i in range(1,10)]
 
         self.assert_lists_equal(expected, actual)
+
+        d.destroy()
 
 
 @pytest.mark.slow
@@ -207,6 +319,7 @@ class TestStateMigration(CalvinTestBase):
 class TestAppLifeCycle(CalvinTestBase):
 
     def testAppDestructionOneRemote(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
           src : std.CountTimer()
           sum : std.Sum()
@@ -223,19 +336,41 @@ class TestAppLifeCycle(CalvinTestBase):
         snk = d.actor_map['simple:snk']
 
         utils.migrate(self.rt1, csum, self.rt2.id)
-        time.sleep(1)
+        time.sleep(.5)
 
         actual = utils.report(self.rt1, snk)
         expected = [sum(range(i+1)) for i in range(1,10)]
         self.assert_lists_equal(expected, actual)
         utils.delete_application(self.rt1, d.app_id)
-        time.sleep(0.5)
-        self.assertIsNone(utils.get_actor(self.rt1, src))
-        self.assertIsNone(utils.get_actor(self.rt1, csum))
-        self.assertIsNone(utils.get_actor(self.rt1, snk))
+
+        for a in range(0, 20):
+            all_removed = None
+            try:
+                self.assertIsNone(utils.get_actor(self.rt1, src))
+                self.assertIsNone(utils.get_actor(self.rt1, csum))
+                self.assertIsNone(utils.get_actor(self.rt1, snk))
+                self.assertIsNone(utils.get_actor(self.rt2, src))
+                self.assertIsNone(utils.get_actor(self.rt2, csum))
+                self.assertIsNone(utils.get_actor(self.rt2, snk))
+                self.assertIsNone(utils.get_actor(self.rt3, src))
+                self.assertIsNone(utils.get_actor(self.rt3, csum))
+                self.assertIsNone(utils.get_actor(self.rt3, snk))
+            except AssertionError as e:
+                print a, e
+                all_removed = e
+            if all_removed is None:
+                break
+            time.sleep(1)
+
+        if all_removed:
+            raise all_removed
+
         self.assertIsNone(utils.get_application(self.rt1, d.app_id))
+        self.assertIsNone(utils.get_application(self.rt2, d.app_id))
+        self.assertIsNone(utils.get_application(self.rt3, d.app_id))
 
     def testAppDestructionAllRemote(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
           src : std.CountTimer()
           sum : std.Sum()
@@ -243,10 +378,14 @@ class TestAppLifeCycle(CalvinTestBase):
           src.integer > sum.integer
           sum.integer > snk.token
           """
+        import sys
+        from twisted.python import log
+        log.startLogging(sys.stdout)
+
         app_info, errors, warnings = compiler.compile(script, "simple")
         d = deployer.Deployer(self.rt1, app_info)
         d.deploy()
-        time.sleep(1)
+        time.sleep(.2)
         src = d.actor_map['simple:src']
         csum = d.actor_map['simple:sum']
         snk = d.actor_map['simple:snk']
@@ -254,23 +393,44 @@ class TestAppLifeCycle(CalvinTestBase):
         utils.migrate(self.rt1, src, self.rt2.id)
         utils.migrate(self.rt1, csum, self.rt2.id)
         utils.migrate(self.rt1, snk, self.rt2.id)
-        time.sleep(1)
+        time.sleep(.5)
 
         actual = utils.report(self.rt2, snk)
         expected = [sum(range(i+1)) for i in range(1,10)]
         self.assert_lists_equal(expected, actual)
         utils.delete_application(self.rt1, d.app_id)
-        time.sleep(0.5)
-        self.assertIsNone(utils.get_actor(self.rt1, src))
-        self.assertIsNone(utils.get_actor(self.rt1, csum))
-        self.assertIsNone(utils.get_actor(self.rt1, snk))
+
+        for a in range(20):
+            all_removed = None
+            try:
+                self.assertIsNone(utils.get_actor(self.rt1, csum))
+                self.assertIsNone(utils.get_actor(self.rt1, snk))
+                self.assertIsNone(utils.get_actor(self.rt2, src))
+                self.assertIsNone(utils.get_actor(self.rt2, csum))
+                self.assertIsNone(utils.get_actor(self.rt2, snk))
+                self.assertIsNone(utils.get_actor(self.rt3, src))
+                self.assertIsNone(utils.get_actor(self.rt3, csum))
+                self.assertIsNone(utils.get_actor(self.rt3, snk))
+            except AssertionError as e:
+                print a, e
+                all_removed = e
+            if all_removed is None:
+                break
+            time.sleep(1)
+
+        if all_removed:
+            raise all_removed
+
         self.assertIsNone(utils.get_application(self.rt1, d.app_id))
+        self.assertIsNone(utils.get_application(self.rt2, d.app_id))
+        self.assertIsNone(utils.get_application(self.rt3, d.app_id))
 
 
 @pytest.mark.essential
 class TestEnabledToEnabledBug(CalvinTestBase):
 
     def test10(self):
+        _log.analyze("TESTRUN", "+", {})
         # Two actors, doesn't seem to trigger the bug
         src = utils.new_actor(self.rt1, 'std.Counter', 'src')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
@@ -283,7 +443,11 @@ class TestEnabledToEnabledBug(CalvinTestBase):
 
         self.assert_lists_equal(range(1, 10), actual)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt1, snk)
+
     def test11(self):
+        _log.analyze("TESTRUN", "+", {})
         # Same as test10, but scripted
         script = """
             src : std.Counter()
@@ -302,7 +466,10 @@ class TestEnabledToEnabledBug(CalvinTestBase):
 
         self.assert_lists_equal(range(1, 10), actual)
 
+        d.destroy()
+
     def test20(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.Counter', 'src')
         ity = utils.new_actor(self.rt1, 'std.Identity', 'ity')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
@@ -316,7 +483,12 @@ class TestEnabledToEnabledBug(CalvinTestBase):
 
         self.assert_lists_equal(range(1, 11), actual)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt1, ity)
+        utils.delete_actor(self.rt1, snk)
+
     def test21(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.Counter', 'src')
         ity = utils.new_actor(self.rt2, 'std.Identity', 'ity')
         snk = utils.new_actor_wargs(self.rt3, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
@@ -324,9 +496,13 @@ class TestEnabledToEnabledBug(CalvinTestBase):
         utils.connect(self.rt3, snk, 'token', self.rt2.id, ity, 'token')
         utils.connect(self.rt2, ity, 'token', self.rt1.id, src, 'integer')
 
-        time.sleep(0.1)
+        interval = 0.5
 
-        actual = utils.report(self.rt3, snk)
+        for retries in range(1, 5):
+            time.sleep(retries * interval)
+            actual = utils.report(self.rt3, snk)
+            if len(actual) > 10:
+                break
 
         while len(actual) < 10:
             time.sleep(0.1)
@@ -334,7 +510,12 @@ class TestEnabledToEnabledBug(CalvinTestBase):
 
         self.assert_lists_equal(range(1, 11), actual)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt2, ity)
+        utils.delete_actor(self.rt3, snk)
+
     def test22(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.Counter', 'src')
         ity = utils.new_actor(self.rt2, 'std.Identity', 'ity')
         snk = utils.new_actor_wargs(self.rt3, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
@@ -342,13 +523,28 @@ class TestEnabledToEnabledBug(CalvinTestBase):
         utils.connect(self.rt2, ity, 'token', self.rt1.id, src, 'integer')
         utils.connect(self.rt3, snk, 'token', self.rt2.id, ity, 'token')
 
+        interval = 0.5
+
+        for retries in range(1, 5):
+            time.sleep(retries * interval)
+            actual = utils.report(self.rt3, snk)
+            if len(actual) > 10:
+                break
+
+        self.assert_lists_equal(range(1, 11), actual)
+
         time.sleep(0.1)
 
         actual = utils.report(self.rt3, snk)
 
         self.assert_lists_equal(range(1, 10), actual)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt2, ity)
+        utils.delete_actor(self.rt3, snk)
+
     def test25(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.Counter', 'src')
         ity = utils.new_actor(self.rt1, 'std.Identity', 'ity')
         snk = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk', store_tokens=1, quiet=1)
@@ -362,7 +558,12 @@ class TestEnabledToEnabledBug(CalvinTestBase):
 
         self.assert_lists_equal(range(1, 10), actual)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt1, ity)
+        utils.delete_actor(self.rt1, snk)
+
     def test26(self):
+        _log.analyze("TESTRUN", "+", {})
         # Same as test20
         script = """
             src : std.Counter()
@@ -383,7 +584,10 @@ class TestEnabledToEnabledBug(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
     def test30(self):
+        _log.analyze("TESTRUN", "+", {})
         src = utils.new_actor(self.rt1, 'std.Counter', 'src')
         snk1 = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk1', store_tokens=1, quiet=1)
         snk2 = utils.new_actor_wargs(self.rt1, 'io.StandardOut', 'snk2', store_tokens=1, quiet=1)
@@ -401,8 +605,13 @@ class TestEnabledToEnabledBug(CalvinTestBase):
         self.assert_lists_equal(list(range(1, 10)), actual1)
         self.assert_lists_equal(list(range(1, 10)), actual2)
 
+        utils.delete_actor(self.rt1, src)
+        utils.delete_actor(self.rt1, snk1)
+        utils.delete_actor(self.rt1, snk2)
+
     def test31(self):
         # Verify that fanout defined implicitly in scripts is handled correctly
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src : std.Counter()
             snk1 : io.StandardOut(store_tokens=1, quiet=1)
@@ -425,12 +634,53 @@ class TestEnabledToEnabledBug(CalvinTestBase):
         self.assert_lists_equal(expected, actual1)
         self.assert_lists_equal(expected, actual2)
 
+        d.destroy()
+
+    def test32(self):
+        # Verify that fanout from component inports is handled correctly
+        _log.analyze("TESTRUN", "+", {})
+        script = """
+            component Foo() in -> a, b{
+              a : std.Identity()
+              b : std.Identity()
+              .in >  a.token
+              .in > b.token
+              a.token > .a
+              b.token > .b
+            }
+
+            snk2 : io.StandardOut(store_tokens=1, quiet=1)
+            snk1 : io.StandardOut(store_tokens=1, quiet=1)
+            foo : Foo()
+            req : std.Counter()
+            req.integer > foo.in
+            foo.a > snk1.token
+            foo.b > snk2.token
+        """
+        app_info, errors, warnings = compiler.compile(script, "test32")
+        d = deployer.Deployer(self.rt1, app_info)
+        d.deploy()
+        time.sleep(0.1)
+
+        snk1 = d.actor_map['test32:snk1']
+        snk2 = d.actor_map['test32:snk2']
+        actual1 = utils.report(self.rt1, snk1)
+        actual2 = utils.report(self.rt1, snk2)
+        expected = list(range(1, 10))
+
+        self.assert_lists_equal(expected, actual1)
+        self.assert_lists_equal(expected, actual2)
+
+        d.destroy()
+
+
 
 @pytest.mark.essential
 class TestNullPorts(CalvinTestBase):
 
     def testVoidActor(self):
         # Verify that the null port of a std.Void actor behaves as expected
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src1 : std.Counter()
             src2 : std.Void()
@@ -453,8 +703,11 @@ class TestNullPorts(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
     def testTerminatorActor(self):
         # Verify that the null port of a std.Terminator actor behaves as expected
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src  : std.Counter()
             term : std.Terminator()
@@ -475,10 +728,13 @@ class TestNullPorts(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
 @pytest.mark.essential
 class TestCompare(CalvinTestBase):
 
     def testBadOp(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Counter()
             const : std.Constant(data=5, n=-1)
@@ -501,7 +757,10 @@ class TestCompare(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
     def testEqual(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Counter()
             const : std.Constant(data=5, n=-1)
@@ -524,7 +783,10 @@ class TestCompare(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
     def testGreaterThanOrEqual(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Counter()
             const : std.Constant(data=5, n=-1)
@@ -547,14 +809,17 @@ class TestCompare(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
 
 @pytest.mark.essential
 class TestSelect(CalvinTestBase):
 
     def testTrue(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Counter()
-            const : std.Constant(data=1, n=-1)
+            const : std.Constant(data=true, n=-1)
             route : std.Select()
             snk   : io.StandardOut(store_tokens=1, quiet=1)
             term  : std.Terminator()
@@ -576,7 +841,10 @@ class TestSelect(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
     def testFalse(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Counter()
             const : std.Constant(data=0, n=-1)
@@ -601,7 +869,10 @@ class TestSelect(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
     def testBadSelect(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Counter()
             const : std.Constant(data=2, n=-1)
@@ -626,11 +897,14 @@ class TestSelect(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual)
 
+        d.destroy()
+
 
 @pytest.mark.essential
 class TestDeselect(CalvinTestBase):
 
     def testDeselectTrue(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src     : std.Counter()
             const_5 : std.Constantify(constant=5)
@@ -660,7 +934,10 @@ class TestDeselect(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
     def testDeselectFalse(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src     : std.Counter()
             const_5 : std.Constantify(constant=5)
@@ -690,7 +967,10 @@ class TestDeselect(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
     def testDeselectBadSelect(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src     : std.Counter()
             const_5 : std.Constantify(constant=5)
@@ -716,11 +996,14 @@ class TestDeselect(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
 
 @pytest.mark.essential
 class TestLineJoin(CalvinTestBase):
 
     def testBasicJoin(self):
+        _log.analyze("TESTRUN", "+", {})
         datafile = absolute_filename('data.txt')
         script = """
             fname : std.Constant(data="%s")
@@ -745,8 +1028,11 @@ class TestLineJoin(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=1)
 
+        d.destroy()
+
     @pytest.mark.xfail
     def testCustomTriggerJoin(self):
+        _log.analyze("TESTRUN", "+", {})
         datafile = absolute_filename('data.txt')
         script = """
             fname : std.Constant(data="%s")
@@ -771,8 +1057,11 @@ class TestLineJoin(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=2)
 
+        d.destroy()
+
     @pytest.mark.xfail
     def testEmptyStringTriggerJoin(self):
+        _log.analyze("TESTRUN", "+", {})
         datafile = absolute_filename('data.txt')
         script = """
             fname : std.Constant(data="%s")
@@ -797,12 +1086,15 @@ class TestLineJoin(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=2)
 
+        d.destroy()
+
 
 
 @pytest.mark.essential
 class TestRegex(CalvinTestBase):
 
     def testRegexMatch(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Constant(data="24.1632", n=1)
             regex : text.RegexMatch(regex=!"\d+\.\d+")
@@ -825,8 +1117,11 @@ class TestRegex(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=1)
 
+        d.destroy()
+
 
     def testRegexNoMatch(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Constant(data="x24.1632", n=1)
             regex : text.RegexMatch(regex=!"\d+\.\d+")
@@ -849,7 +1144,10 @@ class TestRegex(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=1)
 
+        d.destroy()
+
     def testRegexCapture(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Constant(data="24.1632", n=1)
             regex : text.RegexMatch(regex=!"(\d+)\.\d+")
@@ -872,7 +1170,10 @@ class TestRegex(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=1)
 
+        d.destroy()
+
     def testRegexMultiCapture(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Constant(data="24.1632", n=1)
             regex : text.RegexMatch(regex=!"(\d+)\.(\d+)")
@@ -895,8 +1196,11 @@ class TestRegex(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=1)
 
+        d.destroy()
+
 
     def testRegexCaptureNoMatch(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             src   : std.Constant(data="x24.1632", n=1)
             regex : text.RegexMatch(regex=!"(\d+)\.\d+")
@@ -919,10 +1223,13 @@ class TestRegex(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=1)
 
+        d.destroy()
+
 @pytest.mark.essential
 class TestConstantAsArguments(CalvinTestBase):
 
     def testConstant(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             define FOO = 42
             src   : std.Constant(data=FOO, n=10)
@@ -941,7 +1248,10 @@ class TestConstantAsArguments(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
     def testConstantRecursive(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             define FOO = BAR
             define BAR = 42
@@ -961,11 +1271,14 @@ class TestConstantAsArguments(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
 
 @pytest.mark.essential
 class TestConstantOnPort(CalvinTestBase):
 
     def testLiteralOnPort(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             snk   : io.StandardOut(store_tokens=1, quiet=1)
             42 > snk.token
@@ -982,7 +1295,10 @@ class TestConstantOnPort(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
     def testConstantOnPort(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             define FOO = "Hello"
             snk   : io.StandardOut(store_tokens=1, quiet=1)
@@ -1000,7 +1316,10 @@ class TestConstantOnPort(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
     def testConstantRecursiveOnPort(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             define FOO = BAR
             define BAR = "yay"
@@ -1019,11 +1338,14 @@ class TestConstantOnPort(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
 
 @pytest.mark.essential
 class TestConstantAndComponents(CalvinTestBase):
 
     def testLiteralOnCompPort(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             component Foo() -> out {
                 i:std.Stringify()
@@ -1046,7 +1368,10 @@ class TestConstantAndComponents(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
     def testConstantOnCompPort(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             define MEANING = 42
             component Foo() -> out {
@@ -1070,7 +1395,10 @@ class TestConstantAndComponents(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
     def testStringConstantOnCompPort(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
             define MEANING = "42"
             component Foo() -> out {
@@ -1094,10 +1422,13 @@ class TestConstantAndComponents(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
 @pytest.mark.essential
 class TestConstantAndComponentsArguments(CalvinTestBase):
 
     def testComponentArgument(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
         component Count(len) -> seq {
             src : std.Constant(data="hup", n=len)
@@ -1119,7 +1450,10 @@ class TestConstantAndComponentsArguments(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=5)
 
+        d.destroy()
+
     def testComponentConstantArgument(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
         define FOO = 5
         component Count(len) -> seq {
@@ -1142,9 +1476,12 @@ class TestConstantAndComponentsArguments(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=5)
 
+        d.destroy()
+
 
 
     def testComponentConstantArgumentDirect(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
         define FOO = 10
         component Count() -> seq {
@@ -1167,8 +1504,11 @@ class TestConstantAndComponentsArguments(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
 
     def testComponentArgumentAsImplicitActor(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
         component Count(data) -> seq {
             i : std.Identity()
@@ -1191,8 +1531,11 @@ class TestConstantAndComponentsArguments(CalvinTestBase):
 
         self.assert_lists_equal(expected, actual, min_length=10)
 
+        d.destroy()
+
 
     def testComponentConstantArgumentAsImplicitActor(self):
+        _log.analyze("TESTRUN", "+", {})
         script = """
         define FOO = "hup"
         component Count(data) -> seq {
@@ -1215,3 +1558,5 @@ class TestConstantAndComponentsArguments(CalvinTestBase):
         expected = ["hup"]*10
 
         self.assert_lists_equal(expected, actual, min_length=10)
+
+        d.destroy()

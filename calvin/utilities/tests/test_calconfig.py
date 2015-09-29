@@ -17,8 +17,9 @@
 import unittest
 import tempfile
 import os
+import pytest
 
-from calvin.utilities.calconfig import CalConfig
+from calvin.utilities.calvinconfig import CalvinConfig
 
 
 class TestBase(unittest.TestCase):
@@ -37,7 +38,7 @@ class TestBase(unittest.TestCase):
         os.environ = self._env
 
 
-class CalConfigTests(TestBase):
+class CalvinConfigTests(TestBase):
 
     @unittest.skip("Currently, file is not created automatically")
     def test_create_default_config(self):
@@ -46,7 +47,7 @@ class CalConfigTests(TestBase):
 
         os.environ['CALVIN_CONFIG_PATH'] = self.filepath
 
-        CalConfig()
+        CalvinConfig()
 
         self.assertEqual(os.path.exists(self.filepath), True)
 
@@ -57,10 +58,9 @@ class CalConfigTests(TestBase):
 
     def test_set_get(self):
         self.assertEqual(os.path.exists(self.filepath), False)
-        print os.environ
         os.environ['CALVIN_CONFIG_PATH'] = self.filepath
 
-        _conf = CalConfig()
+        _conf = CalvinConfig()
         _conf.add_section("test")
 
         for a in range(10):
@@ -75,10 +75,10 @@ class CalConfigTests(TestBase):
             _conf.set("test", "BANAN%d" % a, range(10))
             self.assertEqual(_conf.get("test", "BANAN%d" % a), range(10))
 
-        # Should this two become the same ?
+        # Should this two become the same ? No.
         for a in range(10):
             _conf.set("test", "BANAN%d" % a, dict(zip(range(10), range(10))))
-            self.assertEqual(_conf.get("test", "BANAN%d" % a), dict(zip([str(x) for x in range(10)], range(10))))
+            self.assertNotEqual(_conf.get("test", "BANAN%d" % a), dict(zip([str(x) for x in range(10)], range(10))))
 
         for a in range(10):
             _conf.set("test", "BANAN%d" % a, dict(zip([str(x) for x in range(10)], range(10))))
@@ -89,33 +89,35 @@ class CalConfigTests(TestBase):
             self.assertEqual(_conf.get("test", "BANAN%d" % a), dict(zip([str(x) for x in range(10)], [range(10)])))
 
     def test_env_override(self):
+        # Env override is only allowed for known sections: GLOBAL, TESTING, DEVELOPER
+        # Also, environment is read upon config creation
         self.assertEqual(os.path.exists(self.filepath), False)
         os.environ['CALVIN_CONFIG_PATH'] = self.filepath
 
-        _conf = CalConfig()
-        _conf.add_section("test")
+        for a in range(10):
+            os.environ['CALVIN_TESTING_APA%d' % a] = "100"
+        _conf = CalvinConfig()
 
         for a in range(10):
-            _conf.set("test", "APA%d" % a, "%d" % a)
-            os.environ['CALVIN_APA%d' % a] = "100"
-            self.assertEqual(_conf.get("test", "APA%d" % a), 100)
+            self.assertEqual(_conf.get("testing", "APA%d" % a), 100)
 
     def test_lists(self):
         self.assertEqual(os.path.exists(self.filepath), False)
         os.environ['CALVIN_CONFIG_PATH'] = self.filepath
 
-        _conf = CalConfig()
+        _conf = CalvinConfig()
         _conf.add_section("test")
 
         test_item = [str(x) for x in range(10)]
         _conf.set("test", "BANAN2", test_item)
         self.assertEqual(_conf.get("test", "BANAN2"), test_item)
 
+    @pytest.mark.xfail()
     def test_env_override_list_append(self):
         self.assertEqual(os.path.exists(self.filepath), False)
         os.environ['CALVIN_CONFIG_PATH'] = self.filepath
 
-        _conf = CalConfig()
+        _conf = CalvinConfig()
         _conf.add_section("test")
 
         test_item = [str(x) for x in range(10)]

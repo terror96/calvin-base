@@ -20,18 +20,29 @@
 
 import json
 import uuid
+import types
 
-from twisted.internet import defer
+from twisted.internet import defer, task, reactor
 from kademlia.network import Server
 from kademlia.protocol import KademliaProtocol
 from kademlia.crawling import NodeSpiderCrawl, ValueSpiderCrawl, RPCFindResponse
 from kademlia.utils import digest
+from kademlia.storage import ForgetfulStorage
 from kademlia.node import Node
 from collections import Counter
 
 from calvin.utilities import calvinlogger
 import base64
 _log = calvinlogger.get_logger(__name__)
+
+# Fix for None types in storage
+class ForgetfulStorageFix(ForgetfulStorage):
+    def get(self, key, default=None):
+        self.cull()
+        if key in self.data:
+            return (True, self[key])
+        return (False, default)
+
 
 class KademliaProtocolAppend(KademliaProtocol):
 
@@ -67,6 +78,15 @@ class KademliaProtocolAppend(KademliaProtocol):
                 else:
                     ds.append(self.callStore(node, key, value))
         return defer.gatherResults(ds)
+
+    # Fix for None in values for delete
+    def rpc_find_value(self, sender, nodeid, key):
+        source = Node(nodeid, sender[0], sender[1])
+        self.router.addContact(source)
+        exists, value = self.storage.get(key, None)
+        if not exists:
+            return self.rpc_find_node(sender, nodeid, key)
+        return { 'value': value }
 
     def rpc_append(self, sender, nodeid, key, value):
         source = Node(nodeid, sender[0], sender[1])
@@ -123,8 +143,23 @@ class KademliaProtocolAppend(KademliaProtocol):
 class AppendServer(Server):
 
     def __init__(self, ksize=20, alpha=3, id=None, storage=None):
-        Server.__init__(self, ksize, alpha, id, storage)
+        storage = storage or ForgetfulStorageFix()
+        Server.__init__(self, ksize, alpha, id, storage=storage)
         self.protocol = KademliaProtocolAppend(self.node, self.storage, ksize)
+
+    def bootstrap(self, addrs):
+        """
+        Bootstrap the server by connecting to other known nodes in the network.
+
+        Args:
+            addrs: A `list` of (ip, port) `tuple` pairs.  Note that only IP addresses
+                   are acceptable - hostnames will cause an error.
+        """
+        # if the transport hasn't been initialized yet, wait a second
+        if self.protocol.transport is None:
+            return task.deferLater(reactor, .2, self.bootstrap, addrs)
+        else:
+            return Server.bootstrap(self, addrs)
 
     def append(self, key, value):
         """
@@ -144,6 +179,26 @@ class AppendServer(Server):
 
         spider = NodeSpiderCrawl(self.protocol, node, nearest, self.ksize, self.alpha)
         return spider.find().addCallback(append)
+
+    def get(self, key):
+        """
+        Get a key if the network has it.
+
+        Returns:
+            :class:`None` if not found, the value otherwise.
+        """
+        dkey = digest(key)
+        # if this node has it, return it
+        exists, value = self.storage.get(dkey)
+        if exists:
+            return defer.succeed(value)
+        node = Node(dkey)
+        nearest = self.protocol.router.findNeighbors(node)
+        if len(nearest) == 0:
+            self.log.warning("There are no known neighbors to get key %s" % key)
+            return defer.succeed(None)
+        spider = ValueSpiderCrawl(self.protocol, node, nearest, self.ksize, self.alpha)
+        return spider.find()
 
     def remove(self, key, value):
         """

@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import pytest
+import uuid
 import logging
 from calvin.utilities import calvinlogger
 
@@ -24,7 +25,9 @@ import sys
 
 def pytest_addoption(parser):
     parser.addoption("--loglevel", action="append", default=[],
-            help="Set log level, levels: CRITICAL, ERROR, WARNING, INFO and DEBUG. To enable on specific modules use 'module:level'")
+            help="Set log level, levels: CRITICAL, ERROR, WARNING, INFO, DEBUG and ANALYZE. To enable on specific modules use 'module:level'")
+    parser.addoption("--logfile", action="store", default=None,
+            help="Set logging to file, specify filename")
     parser.addoption("--actor", action="store", default="",
                      help="Select an actor for test, if empty all actors are tested")
     parser.addoption("--runslow", action="store_true",
@@ -43,6 +46,9 @@ def pytest_runtest_setup(item):
 
 
 def pytest_configure(config):
+    filename = config.getoption("logfile")
+    if filename:
+        calvinlogger.set_file(filename)
     levels = config.getoption("loglevel")
     for level in levels:
         module = None
@@ -59,6 +65,14 @@ def pytest_configure(config):
             calvinlogger.get_logger(module).setLevel(logging.INFO)
         elif level == "DEBUG":
             calvinlogger.get_logger(module).setLevel(logging.DEBUG)
+        elif level == "ANALYZE":
+            calvinlogger.get_logger(module).setLevel(5)
+
+    # TODO: add func to set any argument from here also
+    from calvin.utilities import calvinconfig
+    _conf = calvinconfig.get()
+    _conf.add_section('ARGUMENTS')
+    _conf.set('ARGUMENTS', 'DHT_NETWORK_FILTER', str(uuid.uuid4()))
 
 @pytest.fixture
 def testarg_actor(request):

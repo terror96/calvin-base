@@ -16,17 +16,13 @@
 # limitations under the License.
 
 import argparse
-import deployer
-import select
 import time
+import json
 import traceback
-import cscompiler as compiler
-from calvin.utilities.calvinlogger import get_logger
-from calvin.utilities import utils
-from calvin.utilities.nodecontrol import dispatch_node
 import logging
-
-_log = get_logger(__name__)
+# Calvin related imports must be in functions, to be able to set logfile before imports
+_conf = None
+_log = None
 
 
 def parse_arguments():
@@ -53,50 +49,79 @@ Start runtime, compile calvinscript and deploy application.
                            help='Start PDB')
 
     argparser.add_argument('-l', '--loglevel', dest='loglevel', action='append', default=[],
-                           help="Set log level, levels: CRITICAL, ERROR, WARNING, INFO and DEBUG. \
+                           help="Set log level, levels: CRITICAL, ERROR, WARNING, INFO, DEBUG and ANALYZE. \
                            To enable on specific modules use 'module:level'")
 
-    argparser.add_argument('-w', '--wait', dest='wait', metavar='sec', default=2,
+    argparser.add_argument('-f', '--logfile', dest='logfile', action="store", default=None, type=str,
+                           help="Set logging to file, specify filename")
+
+    argparser.add_argument('-w', '--wait', dest='wait', metavar='sec', default=2, type=int,
                            help='wait for sec seconds before quitting (0 means forever).')
 
     argparser.add_argument('--keep-alive', dest='wait', action='store_const', const=0,
                            help='run forever (equivalent to -w 0 option).')
 
     argparser.add_argument('--attr', metavar='<attr>', type=str,
-                           help='a comma separated list of attributes for started node '
-                                'e.g. node/affiliation/owner/me,node/affiliation/name/bot',
-                           dest='attr')
+                           help='JSON coded attributes for started node '
+                                'e.g. \'{"indexed_public": {"owner": {"personOrGroup": "Me"}}}\''
+                                ', see documentation',
+                           dest='attr', default=None)
+
+    argparser.add_argument('--attr-file', metavar='<attr>', type=str,
+                           help='File with JSON coded attributes for started node '
+                                'e.g. \'{"indexed_public": {"owner": {"personOrGroup": "Me"}}}\''
+                                ', see documentation',
+                           dest='attr_file', default=None)
+
+    argparser.add_argument('--dht-network-filter', type=str,
+                           help='Any string for filtering your dht clients, use same for all nodes in the network.',
+                           default=None)
 
     return argparser.parse_args()
 
 
-def runtime(uri, control_uri, attributes=None):
+def runtime(uri, control_uri, attributes=None, dispatch=False):
+    from calvin.utilities.nodecontrol import dispatch_node, start_node
     kwargs = {'attributes': attributes} if attributes else {}
-    return dispatch_node(uri=uri, control_uri=control_uri, **kwargs)
+    if dispatch:
+        return dispatch_node(uri=uri, control_uri=control_uri, **kwargs)
+    else:
+        start_node(uri, control_uri, **kwargs)
 
 
-def compile(scriptfile):
+def compile_script(scriptfile):
     _log.debug("Compiling %s ..." % file)
-    app_info, errors, warnings = compiler.compile_file(scriptfile)
+    from calvin.Tools import cscompiler
+    app_info, errors, _ = cscompiler.compile_file(scriptfile)
     if errors:
         _log.error("{reason} {script} [{line}:{col}]".format(script=file, **errors[0]))
         return False
     return app_info
 
 
-def deploy(rt, app_info, loglevel):
+def deploy(rt, app_info):
+    from calvin.Tools import deployer
     d = {}
     try:
         d = deployer.Deployer(rt, app_info)
         d.deploy()
-    except Exception:
+    except:
+        from calvin.utilities.calvinlogger import get_logger
         time.sleep(0.1)
         if get_logger().getEffectiveLevel <= logging.DEBUG:
             traceback.print_exc()
     return d.app_id
 
 
-def set_loglevel(levels):
+def set_loglevel(levels, filename):
+    from calvin.utilities.calvinlogger import get_logger, set_file
+    global _log
+
+    if filename:
+        set_file(filename)
+
+    _log = get_logger(__name__)
+
     if not levels:
         get_logger().setLevel(logging.INFO)
         return
@@ -115,48 +140,81 @@ def set_loglevel(levels):
             get_logger(module).setLevel(logging.INFO)
         elif level == "DEBUG":
             get_logger(module).setLevel(logging.DEBUG)
+        elif level == "ANALYZE":
+            get_logger(module).setLevel(5)
 
+
+def dispatch_and_deploy(app_info, wait, uri, control_uri, attr):
+    from calvin.utilities import utils
+    rt, process = runtime(uri, control_uri, attr, dispatch=True)
+    app_id = None
+    app_id = deploy(rt, app_info)
+    print "Deployed application", app_id
+
+    timeout = wait if wait else None
+    if timeout:
+        process.join(timeout)
+        utils.quit(rt)
+        time.sleep(0.1)
+    else:
+        process.join()
+
+def set_config_from_args(args):
+    from calvin.utilities import calvinconfig
+    global _conf
+    _conf = calvinconfig.get()
+    _conf.add_section("ARGUMENTS")
+    for arg in vars(args):
+        if getattr(args, arg) is not None:
+            _log.debug("Adding ARGUMENTS to config {}={}".format(arg, getattr(args, arg)))
+            _conf.set("ARGUMENTS", arg, getattr(args, arg))
 
 def main():
+    import sys
+
     args = parse_arguments()
 
     if args.debug:
         import pdb
         pdb.set_trace()
 
-    set_loglevel(args.loglevel)
+    # Need to be before other calvin calls to set the common log file
+    set_loglevel(args.loglevel, args.logfile)
 
-    deploy_app = args.file
+    set_config_from_args(args)
 
     app_info = None
-    if deploy_app:
-        app_info = compile(args.file)
+
+    if args.file:
+        app_info = compile_script(args.file)
         if not app_info:
+            print "Compilation failed."
             return 1
 
     uri = "calvinip://%s:%d" % (args.host, args.port)
     control_uri = "http://%s:%d" % (args.host, args.controlport)
 
-    attr_list = None
+    attr_ = None
     if args.attr:
-        attr_list = args.attr.split(',')
+        try:
+            attr_ = json.loads(args.attr)
+        except Exception as e:
+            print "Attributes not JSON:\n", e
+            return -1
 
-    rt = runtime(uri, control_uri, attr_list)
+    if args.attr_file:
+        try:
+            attr_ = json.load(open(args.attr_file))
+        except Exception as e:
+            print "Attribute file not JSON:\n", e
+            return -1
 
-    app_id = None
-    if deploy_app:
-        app_id = deploy(rt, app_info, args.loglevel)
-
-    # FIXME: This is a weird construct that is required since python's
-    #        MultiProcess will reap all it's children on exit, regardless
-    #        of deamon attribute value
-    timeout = int(args.wait) if int(args.wait) else None
-    select.select([], [], [], timeout)
-    utils.quit(rt)
-    time.sleep(0.1)
-
-    if app_id:
-        print "Deployed application", app_id
+    if app_info:
+        dispatch_and_deploy(app_info, args.wait, uri, control_uri, attr_)
+    else:
+        runtime(uri, control_uri, attr_, dispatch=False)
+    return 0
 
 if __name__ == '__main__':
-    main()
+    import sys
+    sys.exit(main())

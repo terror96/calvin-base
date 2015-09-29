@@ -19,6 +19,7 @@ import traceback
 import platform
 import random
 import socket
+import netifaces
 
 from calvin.utilities import calvinlogger
 
@@ -53,7 +54,6 @@ MS_RESP =   'HTTP/1.1 200 OK\r\n' + \
             'CACHE-CONTROL: max-age=1800\r\nST: uuid:%s\r\n' % SERVICE_UUID + \
             'DATE: %s\r\n\r\n'
 
-
 def parse_http_response(data):
 
     """ don't try to get the body, there are reponses without """
@@ -71,9 +71,11 @@ def parse_http_response(data):
 
 
 class ServerBase(DatagramProtocol):
-    def __init__(self, d=None):
+    def __init__(self, ips, d=None):
         self._services = {}
         self._dstarted = d
+        self.ignore_list = []
+        self.ips = ips
 
     def startProtocol(self):
         if self._dstarted:
@@ -87,30 +89,42 @@ class ServerBase(DatagramProtocol):
 
             if cmd[0] == 'M-SEARCH' and cmd[1] == '*':
 
+                _log.debug("Ignore list %s ignore %s" % (self.ignore_list, address not in self.ignore_list))
                 # Only reply to our requests
-                if SERVICE_UUID in headers['st']:
+                if SERVICE_UUID in headers['st'] and address not in self.ignore_list:
 
-                    for k, v in self._services.items():
-                        addr = v
-                        # Ignore 0.0.0.0, use the ip we where contacted on
-                        if addr[0] == "0.0.0.0":
-                            addr = (address[0], addr[1])
+                    for k, addrs in self._services.items():
+                        for addr in addrs:
+                            # Only tell local about local
+                            if addr[0] == "127.0.0.1" and address[0] != "127.0.0.1":
+                                continue
 
-                        response = MS_RESP % ('%s:%d' % addr, str(time.time()),
-                                              k, datetimeToString())
-
-                        delay = random.randint(0, min(5, int(headers['mx'])))
-                        reactor.callLater(delay, self.send_it,
-                                          response, address)
+                            response = MS_RESP % ('%s:%d' % addr, str(time.time()),
+                                                  k, datetimeToString())
+                            _log.debug("Sending response: %s" % repr(response))
+                            delay = random.randint(0, min(5, int(headers['mx'])))
+                            reactor.callLater(delay, self.send_it,
+                                                  response, address)
         except:
             _log.exception("Error datagram received")
 
     def add_service(self, service, ip, port):
-        self._services[service] = (ip, port)
+        # Service on all interfaces
+        if ip in ["0.0.0.0", ""]:
+            self._services[service] = []
+            for a in self.ips:
+                _log.debug("Add service %s, %s:%s" % (service, a, port))
+                self._services[service].append((a, port))
+        else:
+            _log.debug("Add service %s, %s:%s" % (service, ip, port))
+            self._services[service] = [(ip, port)]
 
     def remove_service(self, service):
         if service in self._services:
             del self._services[service]
+
+    def set_ignore_list(self, list_):
+        self.ignore_list = list_
 
     def send_it(self, response, destination):
         try:
@@ -179,27 +193,45 @@ class ClientBase(DatagramProtocol):
 
 
 class SSDPServiceDiscovery(ServiceDiscoveryBase):
-    def __init__(self, iface):
+    def __init__(self, iface='', ignore_self=True):
         super(SSDPServiceDiscovery, self).__init__()
-        self.iface = iface
+
+        self.ignore_self = ignore_self
+        self.iface = '' #iface
         self.ssdp = None
         self.port = None
         self._backoff = .2
+        self.iface_send_list = []
+
+        if self.iface in ["0.0.0.0", ""]:
+            for a in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(a)
+                # Ipv4 for now
+                if netifaces.AF_INET in addrs:
+                    for a in addrs[netifaces.AF_INET]:
+                        self.iface_send_list.append(a['addr'])
+        else:
+            self.iface_send_list.append(iface)
 
     def start(self):
         dserver = defer.Deferred()
         dclient = defer.Deferred()
         try:
-            self.ssdp = reactor.listenMulticast(SSDP_PORT, ServerBase(d=dserver),
-                                                listenMultiple=True)
+            self.ssdp = reactor.listenMulticast(SSDP_PORT, ServerBase(self.iface_send_list, d=dserver),
+                                                interface=self.iface, listenMultiple=True)
             self.ssdp.setLoopbackMode(1)
             self.ssdp.joinGroup(SSDP_ADDR, interface=self.iface)
         except:
             _log.exception("Multicast listen join failed!!")
             # Dont start server some one is alerady running locally
 
-        self.port = reactor.listenUDP(0, ClientBase(d=dclient), interface=self.iface)
+        # TODO: Do we need this ?
+        self.port = reactor.listenMulticast(0, ClientBase(d=dclient), interface=self.iface)
         _log.debug("SSDP Host: %s" % repr(self.port.getHost()))
+
+        # Set ignore port and ips
+        if self.ssdp and self.ignore_self:
+            self.ssdp.protocol.set_ignore_list([(x, self.port.getHost().port) for x in self.iface_send_list])
 
         return dserver, dclient
 
@@ -230,12 +262,15 @@ class SSDPServiceDiscovery(ServiceDiscoveryBase):
 
     def _send_msearch(self, once=True):
         if self.port:
-            _log.debug("Sending M-SEARCH...")
-            self.port.write(MS, (SSDP_ADDR, SSDP_PORT))
-            if not once and self.port is not None and not self.port.protocol.is_stopped():
+            for src_ip in self.iface_send_list:
+                self.port.protocol.transport.setOutgoingInterface(src_ip)
+                _log.debug("Sending  M-SEARCH... on %s", src_ip)
+                self.port.write(MS, (SSDP_ADDR, SSDP_PORT))
+
+            if not once and not self.port.protocol.is_stopped():
                 reactor.callLater(self._backoff, self._send_msearch, once=False)
-                self._backoff = min(10, self._backoff * 1.5)
-                _log.debug("backoff %s" % self._backoff)
+                _log.debug("Next M-SEARCH in %s seconds" % self._backoff)
+                self._backoff = min(600, self._backoff * 1.5)
         else:
             _log.debug(traceback.format_stack())
 
