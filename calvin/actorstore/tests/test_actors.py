@@ -180,7 +180,11 @@ requirements = \
         'calvinsys.io.filehandler': CalvinSysFileMock,
         'calvinsys.events.timer': CalvinSysTimerMock,
         'calvinsys.native.python-os-path': load_python_requirement('python-os-path'),
-        'calvinsys.native.python-re': load_python_requirement('python-re')
+        'calvinsys.native.python-re': load_python_requirement('python-re'),
+        'calvinsys.native.python-json': load_python_requirement('python-json'),
+        'calvinsys.native.python-copy': load_python_requirement('python-copy'),
+        'calvinsys.native.python-base64': load_python_requirement('python-base64')
+
     }
 
 

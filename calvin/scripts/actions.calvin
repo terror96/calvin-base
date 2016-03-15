@@ -1,9 +1,0 @@
-src:std.CountTimer()
-dmy:std.DummyAction()
-snk:io.StandardOut()
-
-src.integer > dmy.token
-dmy.token > snk.token
-
-
-

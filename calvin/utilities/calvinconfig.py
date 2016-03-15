@@ -78,14 +78,17 @@ class CalvinConfig(object):
 
     def default_config(self):
         default = {
-            'global':{
+            'global': {
                 'comment': 'User definable section',
                 'actor_paths': ['systemactors'],
                 'framework': 'twistedimpl',
                 'storage_proxy': None,
                 'storage_start': True,
+                'capabilities_blacklist': [],
                 'remote_coder_negotiator': 'static',
-                'static_coder': 'json'
+                'static_coder': 'json',
+                'media_framework': 'defaultimpl',
+                'display_plugin': 'stdout_impl'
             },
             'testing': {
                 'comment': 'Test settings',
@@ -172,6 +175,8 @@ class CalvinConfig(object):
             confpath = path+'/calvin.conf'
         elif os.path.exists(path+'/.calvin.conf'):
             confpath = path+'/.calvin.conf'
+        elif os.path.exists(path) and os.path.isfile(path):
+            confpath = path
         else:
             return None
 
@@ -246,6 +251,9 @@ class CalvinConfig(object):
                 self.wildcards.append(wildcard)
             except Exception as e:
                 _log.warning("Value {} of evironment variable {} is malformed, skipping.".format(repr(value), wildcard))
+
+    def save(self, path, skip_arguments=True):
+        json.dump({k: v for k, v in self.config.iteritems() if k != "arguments" or not skip_arguments}, open(path, 'w'))
 
     def __str__(self):
         d = {}

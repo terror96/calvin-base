@@ -21,6 +21,7 @@ from calvin.utilities import calvinlogger
 from calvin.utilities.calvin_callback import CalvinCB
 from calvin.actor import actorport
 from calvin.utilities import calvinconfig
+from calvin.actorstore.store import GlobalStore
 import re
 
 _log = calvinlogger.get_logger(__name__)
@@ -115,13 +116,19 @@ class Storage(object):
                                 'REMOVE': self.remove,
                                 'DELETE': self.delete,
                                 'REPLY': self._proxy_reply}
-            self.node.proto.register_tunnel_handler('storage', CalvinCB(self.tunnel_request_handles))
+            try:
+                self.node.proto.register_tunnel_handler('storage', CalvinCB(self.tunnel_request_handles))
+            except:
+                # OK, then skip being a proxy server
+                pass
 
     def stop(self, cb=None):
         """ Stop storage
         """
         if self.started:
             self.storage.stop(cb=cb)
+        elif cb:
+            cb()
         self.started = False
 
     ### Storage operations ###
@@ -187,12 +194,14 @@ class Storage(object):
                     _log.error("Failed to get: %s" % key)
                     async.DelayedCall(0, cb, key=key, value=False)
 
-    def get_concat_cb(self, key, value, org_cb, org_key):
+    def get_concat_cb(self, key, value, org_cb, org_key, local_list):
         """ get callback
         """
         if value:
             value = self.coder.decode(value)
-        org_cb(org_key, value)
+            org_cb(org_key, list(set(value + local_list)))
+        else:
+            org_cb(org_key, local_list if local_list else None)
 
     def get_concat(self, prefix, key, cb):
         """ Get value for key: prefix+key, first look in localstore
@@ -203,15 +212,18 @@ class Storage(object):
         """
         if cb:
             if prefix + key in self.localstore_sets:
+                _log.analyze(self.node.id, "+ GET LOCAL", None)
                 value = self.localstore_sets[prefix + key]
                 # Return the set that we intended to append since that's all we have until it is synced
-                cb(key=key, value=list(value['+']))
+                local_list = list(value['+'])
             else:
-                try:
-                    self.storage.get_concat(key=prefix + key, cb=CalvinCB(func=self.get_concat_cb, org_cb=cb, org_key=key))
-                except:
-                    _log.error("Failed to get: %s" % key)
-                    cb(key=key, value=None)
+                local_list = []
+            try:
+                self.storage.get_concat(key=prefix + key,
+                                cb=CalvinCB(func=self.get_concat_cb, org_cb=cb, org_key=key, local_list=local_list))
+            except:
+                _log.error("Failed to get: %s" % key, exc_info=True)
+                async.DelayedCall(0, cb, key=key, value=local_list if local_list else None)
 
     def append_cb(self, key, value, org_key, org_value, org_cb):
         """ append callback, on error retry after flush_timeout
@@ -318,9 +330,9 @@ class Storage(object):
                          "control_uri": node.control_uri,
                          "attributes": {'public': node.attributes.get_public(),
                                         'indexed_public': node.attributes.get_indexed_public(as_list=False)}}, cb=cb)
-        # Add to index after a while since storage not up and running anyway
-        #async.DelayedCall(1.0, self._add_node_index, node)
         self._add_node_index(node)
+        # Store all actors on this node in storage
+        GlobalStore(node=node).export()
 
     def _add_node_index(self, node, cb=None):
         indexes = node.attributes.get_indexed_public()
@@ -330,6 +342,13 @@ class Storage(object):
                 self.add_index(index, node.id)
         except:
             _log.debug("Add node index failed", exc_info=True)
+            pass
+        # Add the capabilities
+        try:
+            for c in node._calvinsys.list_capabilities():
+                self.add_index(['node', 'capabilities', c], node.id, root_prefix_level=3)
+        except:
+            _log.debug("Add node capabilities failed", exc_info=True)
             pass
 
     def get_node(self, node_id, cb=None):
@@ -342,12 +361,13 @@ class Storage(object):
         """
         Delete node from storage
         """
-        self.delete(prefix="node-", key=node.id, cb=None if node.attributes else cb)
-        if node.attributes:
+        self.delete(prefix="node-", key=node.id, cb=None if node.attributes.get_indexed_public() else cb)
+        if node.attributes.get_indexed_public():
             self._delete_node_index(node, cb=cb)
 
     def _delete_node_index(self, node, cb=None):
         indexes = node.attributes.get_indexed_public()
+        _log.analyze(self.node.id, "+", {'indexes': indexes})
         try:
             counter = [len(indexes)]  # counter value by reference used in callback
             for index in indexes:
@@ -360,11 +380,13 @@ class Storage(object):
                 cb()
 
     def _delete_node_cb(self, counter, org_cb, *args, **kwargs):
+        _log.analyze(self.node.id, "+", {'counter': counter[0]})
         counter[0] = counter[0] - 1
         if counter[0] == 0:
             org_cb(*args, **kwargs)
 
     def _delete_node_timeout_cb(self, counter, org_cb):
+        _log.analyze(self.node.id, "+", {'counter': counter[0]})
         if counter[0] > 0:
             _log.debug("Delete node index not finished but call callback anyway")
             org_cb()
@@ -583,6 +605,9 @@ class Storage(object):
         # since might get index from several levels of index trie, and instead of building a complete
         # list before returning better to return iteratively for nodes with less memory
         # or system with large number of nodes, might also need a timeout.
+
+        if isinstance(index, list):
+            index = "/".join(index)
 
         if not index.startswith("/"):
             index = "/" + index

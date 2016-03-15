@@ -17,6 +17,8 @@
 from calvin.actorstore.store import ActorStore
 from calvin.utilities.calvinlogger import get_logger
 from calvin.utilities.calvin_callback import CalvinCB
+import calvin.utilities.calvinresponse as response
+from calvin.actor.actor import ShadowActor
 
 _log = get_logger(__name__)
 
@@ -35,7 +37,8 @@ class ActorManager(object):
         self.actors = {}
         self.node = node
 
-    def new(self, actor_type, args, state=None, prev_connections=None, connection_list=None, callback=None):
+    def new(self, actor_type, args, state=None, prev_connections=None, connection_list=None, callback=None,
+            signature=None):
         """
         Instantiate an actor of type 'actor_type'. Parameters are passed in 'args',
         'name' is an optional parameter in 'args', specifying a human readable name.
@@ -48,8 +51,6 @@ class ActorManager(object):
           2) a mangled list of tuples with (in_node_id, in_port_id, out_node_id, out_port_id) supplied as
              connection_list
         """
-        # When renewing (e.g. after migrate) apply the args from the state
-        # instead of any directly supplied
         _log.debug("class: %s args: %s state: %s", actor_type, args, state)
         _log.analyze(self.node.id, "+", {'actor_type': actor_type, 'state': state})
 
@@ -61,6 +62,9 @@ class ActorManager(object):
         except Exception as e:
             _log.exception("Actor creation failed")
             raise(e)
+
+        # Store the actor signature to enable GlobalStore lookup
+        a._signature = signature
 
         self.actors[a.id] = a
 
@@ -76,25 +80,36 @@ class ActorManager(object):
         else:
             # Nothing to connect then we are OK
             if callback:
-                callback(status='ACK', actor_id=a.id)
+                callback(status=response.CalvinResponse(True), actor_id=a.id)
             else:
                 return a.id
 
     def _new_actor(self, actor_type, actor_id=None):
         """Return a 'bare' actor of actor_type, raises an exception on failure."""
         (found, is_primitive, class_) = ActorStore().lookup(actor_type)
+        if not found:
+            # Here assume a primtive actor, now become shadow actor
+            _log.analyze(self.node.id, "+ NOT FOUND CREATE SHADOW ACTOR", {'class': class_})
+            found = True
+            is_primitive = True
+            class_ = ShadowActor
         if not found or not is_primitive:
             _log.error("Requested actor %s is not available" % (actor_type))
             raise Exception("ERROR_NOT_FOUND")
         try:
             # Create a 'bare' instance of the actor
             a = class_(actor_type, actor_id)
-            a._calvinsys = self.node.calvinsys()
-            a.check_requirements()
         except Exception as e:
             _log.exception("")
             _log.error("The actor %s(%s) can't be instantiated." % (actor_type, class_.__init__))
             raise(e)
+        try:
+            a._calvinsys = self.node.calvinsys()
+            a.check_requirements()
+        except Exception as e:
+            _log.analyze(self.node.id, "+ FAILED REQS CREATE SHADOW ACTOR", {'class': class_})
+            a = ShadowActor(actor_type, actor_id)
+            a._calvinsys = self.node.calvinsys()
         return a
 
 
@@ -115,13 +130,23 @@ class ActorManager(object):
 
 
     def _new_from_state(self, actor_type, state):
-        """Return an restored actor in PENDING state, raises an exception on failure."""
+        """Return a restored actor in PENDING state, raises an exception on failure."""
         try:
-            print repr(state)
+            _log.analyze(self.node.id, "+", state)
             a = self._new_actor(actor_type, actor_id=state['id'])
+            if '_shadow_args' in state:
+                # We were a shadow, do a full init
+                args = state.pop('_shadow_args')
+                state['_managed'].remove('_shadow_args')
+                a.init(**args)
+                shadow_migrate = True
+            else:
+                shadow_migrate = False
+            # Always do a set_state for the port's state
             a.set_state(state)
             self.node.pm.add_ports_of_actor(a)
-            a.did_migrate()
+            if not shadow_migrate:
+                a.did_migrate()
             a.setup_complete()
         except Exception as e:
             raise(e)
@@ -154,12 +179,12 @@ class ActorManager(object):
         if actor_id not in self.actors:
             # Can only migrate actors from our node
             if callback:
-                callback(status="NACK")
+                callback(status=response.CalvinResponse(False))
             return
         if node_id == self.node.id:
             # No need to migrate to ourself
             if callback:
-                callback(status="ACK")
+                callback(status=response.CalvinResponse(True))
             return
 
         actor = self.actors[actor_id]
@@ -176,9 +201,9 @@ class ActorManager(object):
                                                   callback=callback),
                                 actor_id=actor_id)
 
-    def _migrate_disconnected(self, actor, actor_type, ports, node_id, status=None, callback = None, **state):
+    def _migrate_disconnected(self, actor, actor_type, ports, node_id, status, callback = None, **state):
         """ Actor disconnected, continue migration """
-        if status == 'ACK':
+        if status:
             state = actor.state()
             self.destroy(actor.id)
             self.node.proto.actor_new(node_id, callback, actor_type, state, ports)
@@ -227,23 +252,23 @@ class ActorManager(object):
 
     def _actor_connected(self, status, peer_port_id, actor_id, peer_port_ids, _callback, **kwargs):
         """ Get called for each of the actor's ports when connecting, but callback should only be called once
-            status: 'ACK'/'NACK'
+            status: success or not
             _callback: original callback
             peer_port_ids: list of port ids kept in context between calls when *changed* by this function,
                            do not replace it
         """
-        # Send NACK if not already done it
-        if status == "NACK" and peer_port_ids:
+        # Send negative response if not already done it
+        if not status and peer_port_ids:
             if _callback:
                 del peer_port_ids[:]
-                _callback(status="NACK", actor_id=actor_id)
+                _callback(status=response.CalvinResponse(False), actor_id=actor_id)
         if peer_port_id in peer_port_ids:
             # Remove this port from list
             peer_port_ids.remove(peer_port_id)
-            # If all ports done send ACK
+            # If all ports done send OK
             if not peer_port_ids:
                 if _callback:
-                    _callback(status="ACK", actor_id=actor_id)
+                    _callback(status=response.CalvinResponse(True), actor_id=actor_id)
 
     def connections(self, actor_id):
         return self.actors.get(actor_id, None).connections(self.node.id)
@@ -264,6 +289,21 @@ class ActorManager(object):
             raise e
         success = actor.set_port_property(port_type, port_name, port_property, value)
         return 'OK' if success else 'FAILURE'
+
+    def get_port_state(self, actor_id, port_id):
+        try:
+            actor = self.actors[actor_id]
+        except Exception as e:
+            _log.exception("Actor '%s' not found" % (actor_id,))
+            raise e
+
+        for port in actor.inports.values():
+            if port.id == port_id:
+                return port.fifo._state()
+        for port in actor.outports.values():
+            if port.id == port_id:
+                return port.fifo._state()
+        raise Exception("No port with id: %s" % port_id)
 
     def actor_type(self, actor_id):
         actor = self.actors.get(actor_id, None)

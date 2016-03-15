@@ -18,12 +18,13 @@ import os
 from setuptools import setup
 
 
-def read_desc(fname):
-    return open(os.path.join(os.path.dirname(__file__), fname)).read()
+def read_description(fname):
+    with open(os.path.join(os.path.dirname(__file__), fname)) as fp:
+        return fp.read()
 
 
 setup(name='calvin',
-      version='0.3',
+      version='0.4',
       url="http://github.com/EricssonResearch/calvin-base",
       license="Apache Software License",
       author="Ericsson Research",
@@ -46,7 +47,7 @@ setup(name='calvin',
       ],
       description="Calvin is a distributed runtime and development framework for an actor based dataflow"
                   "programming methodology",
-      long_description=read_desc('README.md'),
+      long_description=read_description('README.md'),
       packages=["calvin"],
       include_package_data=True,
       platforms='any',
@@ -63,7 +64,7 @@ setup(name='calvin',
           "Topic :: Software Development",
       ],
       extras_require={
-          'testing': ['pytest', 'mock', 'pyserial', 'pytest-twisted']
+          'crypto': 'pyOpenSSL==0.15.1'
       },
       entry_points={
           'console_scripts': [

@@ -20,6 +20,7 @@ from calvin.utilities.calvin_callback import CalvinCB
 from calvin.utilities import calvinlogger
 _log = calvinlogger.get_logger(__name__)
 from calvin.runtime.north.plugins.requirements import req_operations
+import calvin.utilities.calvinresponse as response
 
 
 
@@ -149,21 +150,21 @@ class AppManager(object):
             _log.analyze(self._node.id, "+ DONE", {})
             self._destroy_final(application)
 
-    def _destroy_actor_cb(self, actor_id, value, application, retries=0):
+    def _destroy_actor_cb(self, key, value, application, retries=0):
         """ Get actor callback """
-        _log.analyze(self._node.id, "+", {'actor_id': actor_id, 'value': value, 'retries': retries})
-        _log.debug("Destroy app peers actor cb %s" % actor_id)
+        _log.analyze(self._node.id, "+", {'actor_id': key, 'value': value, 'retries': retries})
+        _log.debug("Destroy app peers actor cb %s" % key)
         if value and 'node_id' in value:
-            application.update_node_info(value['node_id'], actor_id)
+            application.update_node_info(value['node_id'], key)
         else:
             if retries<10:
                 # FIXME add backoff time
-                _log.analyze(self._node.id, "+ RETRY", {'actor_id': actor_id, 'value': value, 'retries': retries})
-                self.storage.get_actor(actor_id, CalvinCB(func=self._destroy_actor_cb, application=application, retries=(retries+1)))
+                _log.analyze(self._node.id, "+ RETRY", {'actor_id': key, 'value': value, 'retries': retries})
+                self.storage.get_actor(key, CalvinCB(func=self._destroy_actor_cb, application=application, retries=(retries+1)))
             else:
                 # FIXME report failure
-                _log.analyze(self._node.id, "+ GIVE UP", {'actor_id': actor_id, 'value': value, 'retries': retries})
-                application.update_node_info(None, actor_id)
+                _log.analyze(self._node.id, "+ GIVE UP", {'actor_id': key, 'value': value, 'retries': retries})
+                application.update_node_info(None, key)
 
         if application.complete_node_info():
             self._destroy_final(application)
@@ -173,7 +174,7 @@ class AppManager(object):
 
         def _callback(*args, **kwargs):
             _log.debug("Destroyed actor params (%s, %s)" % (args, kwargs))
-            _log.analyze(self._node.id, "+ CALLBACK DESTROYED ACTOR", {'args': args, 'kwargs': kwargs})
+            _log.analyze(self._node.id, "+ CALLBACK DESTROYED ACTOR", {'args': str(args), 'kwargs': str(kwargs)})
 
         _log.analyze(self._node.id, "+", {'node_info': application.node_info, 'origin_node_id': application.origin_node_id})
         for node_id, actor_ids in application.node_info.iteritems():
@@ -197,16 +198,16 @@ class AppManager(object):
         """ Request from peer of local application parts destruction and related actors """
         _log.debug("Destroy request, app: %s, actors: %s" % (application_id, actor_ids))
         _log.analyze(self._node.id, "+", {'application_id': application_id, 'actor_ids': actor_ids})
-        reply = "ACK"
+        reply = response.CalvinResponse(True)
         for actor_id in actor_ids:
             if actor_id in self._node.am.list_actors():
                 self._node.am.destroy(actor_id)
             else:
-                reply = "NACK"
+                reply = response.CalvinResponse(False)
         if application_id in self.applications:
             del self.applications[application_id]
         _log.debug("Destroy request reply %s" % reply)
-        _log.analyze(self._node.id, "+ RESPONSE", {'reply': reply})
+        _log.analyze(self._node.id, "+ RESPONSE", {'reply': str(reply)})
         return reply
 
     def list_applications(self):
@@ -222,7 +223,7 @@ class AppManager(object):
             app = self.applications[application_id]
         except:
             _log.debug("deployment_add_requirements did not find app %s" % (application_id,))
-            cb(status="NACK")
+            cb(status=response.CalvinResponse(False))
             return
         _log.debug("deployment_add_requirements(app=%s,\n reqs=%s)" % (self.applications[application_id], reqs))
 
@@ -230,18 +231,20 @@ class AppManager(object):
 
         if "requirements" not in reqs:
             # No requirements then we are happy
-            cb(status="ACK")
+            cb(status=response.CalvinResponse(True))
             return
 
         if hasattr(app, '_org_cb'):
             # application deployment requirements ongoing, abort
-            cb(status="ACK")
+            cb(status=response.CalvinResponse(True))
             return
         app._org_cb = cb
         name_map = app.get_actor_name_map(ns=app.ns)
         app._track_actor_cb = app.get_actors()[:]  # take copy of app's actor list, to remove each when done
         app.actor_placement = {}  # Clean placement slate
-        for actor_name, req in reqs["requirements"].iteritems():
+        _log.analyze(self._node.id, "+ APP REQ", {'requirements': reqs["requirements"]}, tb=True)
+        rr=reqs["requirements"].copy()
+        for actor_name, req in rr.iteritems():
             # Component returns list of actor ids, actors returns list with single id
             actor_ids = name_map.get((app.ns + ":" if app.ns else "") + actor_name, None)
             # Apply same rule to all actors in a component, rule get component information and can act accordingly
@@ -251,7 +254,10 @@ class AppManager(object):
                     continue
                 actor = self._node.am.actors[actor_id]
                 actor.deployment_add_requirements(req, component=(actor_ids if len(actor_ids)>1 else None))
+                _log.analyze(self._node.id, "+ ACTOR REQ", {'actor_id': actor_id, 'actor_ids': actor_ids}, tb=True)
                 self.actor_requirements(app, actor_id)
+            _log.analyze(self._node.id, "+ ACTOR REQ DONE", {'actor_ids': actor_ids}, tb=True)
+        _log.analyze(self._node.id, "+ DONE", {'application_id': application_id}, tb=True)
 
     def actor_requirements(self, app, actor_id):
         if actor_id not in self._node.am.list_actors():
@@ -259,11 +265,11 @@ class AppManager(object):
             return
 
         actor = self._node.am.actors[actor_id]
-        _log.debug("actor_requirements(actor_id=%s), reqs=%s" % (actor_id, actor._deployment_requirements))
+        _log.debug("actor_requirements(actor_id=%s), reqs=%s" % (actor_id, actor.get_deployment_requirements()))
         possible_nodes = set([None])  # None to mark no real response
         impossible_nodes = set([None])  # None to mark no real response
-        reqs = actor._deployment_requirements[:]
-        for req in actor._deployment_requirements:
+        reqs = actor.get_deployment_requirements()[:]
+        for req in actor.get_deployment_requirements():
             if req['op']=='union_group':
                 # Special operation that first forms a union of a requirement's list response set
                 # To allow alternative requirements options
@@ -289,10 +295,11 @@ class AppManager(object):
                 except:
                     _log.error("actor_requirements one req failed for %s!!!" % actor_id, exc_info=True)
                     reqs.remove(req)
-        if not reqs:
-            _log.error("actor_requirements all req failed for %s!!!" % actor_id)
+        if not reqs and actor_id in app._track_actor_cb:
+            _log.analyze(self._node.id, "+ LOOP DONE", {'actor_id': actor_id, '_track_actor_cb': app._track_actor_cb}, tb=True)
             app._track_actor_cb.remove(actor_id)
             self._actor_requirements_combined(app, actor_id, possible_nodes, impossible_nodes)
+        _log.analyze(self._node.id, "+ DONE", {'actor_id': actor_id}, tb=True)
 
     def _union_requirements(self, **state):
         state['union_nodes'] = set([])
@@ -326,6 +333,7 @@ class AppManager(object):
             state['union_nodes'] |= set(node_ids)
         state['union_reqs'].remove(state['union_req'])
         if not state['union_reqs']:
+            state['union_reqs'].append(None)  # To prevent _union_requirements from also calling _actor_requirements_cb
             _log.debug("_union_requirements_cb req done union nodes: %s" % (state['union_nodes'],))
             self._actor_requirements_cb(node_ids=state['union_nodes'], 
                                         app=state['app'], 
@@ -336,8 +344,10 @@ class AppManager(object):
                                         reqs=state['reqs'])
 
     def _actor_requirements_cb(self, node_ids, app, req, actor_id, possible_nodes, impossible_nodes, reqs):
-        _log.debug("_actor_requirements_cb(node_ids=%s)", node_ids)
-        if req['type']=='+' and node_ids:
+        _log.analyze(self._node.id, "+", {'actor_id': actor_id,
+                     'node_ids': list(node_ids) if isinstance(node_ids, set) else node_ids,
+                     'req': req}, tb=True)
+        if req['type']=='+' and node_ids is not None:
             # Positive rule, collect in possible nodes
             if None in possible_nodes:
                 # Possible set starts empty hence fill it with first response
@@ -346,7 +356,7 @@ class AppManager(object):
             else:
                 # Possible set is section between all individual req's sets
                 possible_nodes &= set(node_ids)
-        elif req['type']=='-' and node_ids:
+        elif req['type']=='-' and node_ids is not None:
             # Negative rule, collect in impossible nodes
             if None in impossible_nodes:
                 # Impossible set starts empty hence fill it with first response
@@ -361,34 +371,40 @@ class AppManager(object):
             # Collected all rules for actor, 
             app._track_actor_cb.remove(actor_id)
             self._actor_requirements_combined(app, actor_id, possible_nodes, impossible_nodes)
+        _log.analyze(self._node.id, "+ DONE", {'node_ids': list(node_ids) if isinstance(node_ids, set) else node_ids}, tb=True)
 
     def _actor_requirements_combined(self, app, actor_id, possible_nodes, impossible_nodes):
         possible_nodes -= set([None])
         impossible_nodes -= set([None])
         possible_nodes -= impossible_nodes
         app.actor_placement[actor_id] = possible_nodes
+        _log.analyze(self._node.id, "+", {'actor_id': actor_id, 'possible_nodes': list(possible_nodes),
+                     'track_actor_cb': app._track_actor_cb}, tb=True)
         if not app._track_actor_cb:
             # Done collecting possible actor placement for all actors in application
+            _log.analyze(self._node.id, "+ ALL ACTORS FINISHED", {'app_id': app.id}, tb=True)
             self._app_requirements(app)
+        _log.analyze(self._node.id, "+ DONE", {'actor_id': actor_id}, tb=True)
 
     def _app_requirements(self, app):
         _log.debug("_app_requirements(app=%s)" % (app,))
-        _log.analyze(self._node.id, "+ ACTOR PLACEMENT", {'placement': {k: list(v) for k, v in app.actor_placement.iteritems()}})
+        _log.analyze(self._node.id, "+ ACTOR PLACEMENT", {'placement': {k: list(v) for k, v in app.actor_placement.iteritems()}}, tb=True)
         if any([not n for n in app.actor_placement.values()]):
             # At least one actor have no possible placement
-            app._org_cb(status="NACK")
+            app._org_cb(status=response.CalvinResponse(False))
             del app._org_cb
+            _log.analyze(self._node.id, "+ NO PLACEMENT", {'app_id': app.id}, tb=True)
             return
 
         # Collect an actor by actor matrix stipulating a weighting 0.0 - 1.0 for their connectivity
         actor_ids, actor_matrix = self._actor_connectivity(app)
-        _log.analyze(self._node.id, "+ ACTOR MATRIX", {'actor_ids': actor_ids, 'actor_matrix': actor_matrix})
 
         # Get list of all possible nodes
         node_ids = set([])
         for possible_nodes in app.actor_placement.values():
             node_ids |= possible_nodes
         node_ids = list(node_ids)
+        _log.analyze(self._node.id, "+ ACTOR MATRIX", {'actor_ids': actor_ids, 'actor_matrix': actor_matrix, 'node_ids': node_ids}, tb=True)
 
         # Weight the actors possible placement with their connectivity matrix
         weighted_actor_placement = {}
@@ -397,12 +413,13 @@ class AppManager(object):
             actor_weights = actor_matrix[actor_ids.index(actor_id)]
             # Sum the actor weights for each actors possible nodes, matrix mult AA * AN,
             # AA actor weights, AN actor * node with 1 when possible
-            weights = [sum([actor_weights[actor_ids.index(_id)] if node_id in app.actor_placement[_id] else 0
+            weights = [sum([actor_weights[actor_ids.index(_id)] if node_id in app.actor_placement[actor_id] else 0
                              for _id in actor_ids])
                              for node_id in node_ids]
             # Get first node with highest weight
             # FIXME should verify that the node actually exist also
             # TODO should select from a resource sharing perspective also, instead of picking first max
+            _log.analyze(self._node.id, "+ WEIGHTS", {'actor_id': actor_id, 'weights': weights})
             weighted_actor_placement[actor_id] = node_ids[weights.index(max(weights))]
 
         for actor_id, node_id in weighted_actor_placement.iteritems():
@@ -410,8 +427,9 @@ class AppManager(object):
             _log.debug("Actor deployment %s \t-> %s" % (app.actors[actor_id], node_id))
             self._node.am.migrate(actor_id, node_id)
 
-        app._org_cb(status="ACK", placement=weighted_actor_placement)
+        app._org_cb(status=response.CalvinResponse(True), placement=weighted_actor_placement)
         del app._org_cb
+        _log.analyze(self._node.id, "+ DONE", {'app_id': app.id}, tb=True)
 
     def _actor_connectivity(self, app):
         """ Matrix of weights between actors how close they want to be

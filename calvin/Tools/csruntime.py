@@ -20,6 +20,7 @@ import time
 import json
 import traceback
 import logging
+import os
 # Calvin related imports must be in functions, to be able to set logfile before imports
 _conf = None
 _log = None
@@ -77,6 +78,9 @@ Start runtime, compile calvinscript and deploy application.
                            help='Any string for filtering your dht clients, use same for all nodes in the network.',
                            default=None)
 
+    argparser.add_argument('-s', '--storage-only', dest='storage', action='store_true', default=False,
+                           help='Start storage only runtime')
+
     return argparser.parse_args()
 
 
@@ -87,6 +91,15 @@ def runtime(uri, control_uri, attributes=None, dispatch=False):
         return dispatch_node(uri=uri, control_uri=control_uri, **kwargs)
     else:
         start_node(uri, control_uri, **kwargs)
+
+
+def storage_runtime(uri, control_uri, attributes=None, dispatch=False):
+    from calvin.utilities.nodecontrol import dispatch_storage_node, start_storage_node
+    kwargs = {}
+    if dispatch:
+        return dispatch_storage_node(uri=uri, control_uri=control_uri, **kwargs)
+    else:
+        start_storage_node(uri, control_uri, **kwargs)
 
 
 def compile_script(scriptfile):
@@ -212,8 +225,35 @@ def main():
     if app_info:
         dispatch_and_deploy(app_info, args.wait, uri, control_uri, attr_)
     else:
-        runtime(uri, control_uri, attr_, dispatch=False)
+        if args.storage:
+            storage_runtime(uri, control_uri, attr_, dispatch=False)
+        else:
+            runtime(uri, control_uri, attr_, dispatch=False)
     return 0
+
+
+def csruntime(host, port=5000, controlport=5001, loglevel=None, logfile=None, attr=None, storage=False, 
+              outfile=None, configfile=None):
+    """ Create a completely seperate process for the runtime. Useful when doing tests that start multiple
+        runtimes from the same python script, since some objects otherwise gets unexceptedly shared.
+    """
+    call = "csruntime -n %s -p %d -c %d" % (host, port, controlport)
+    try:
+        call += (" --attr \"%s\"" % (json.dumps(attr).replace('"',"\\\""), )) if attr else ""
+    except:
+        pass
+    call += " -s" if storage else ""
+    call += (" --logfile %s" % (logfile, )) if logfile else ""
+    if loglevel:
+        for l in loglevel:
+            call += " --loglevel %s" % (l, )
+    call += " -w 0"
+    call += (" &> %s" % outfile) if outfile else ""
+    call += " &"
+    if configfile:
+        call = "CALVIN_CONFIG_PATH=%s " % configfile + call
+    return os.system(call)
+
 
 if __name__ == '__main__':
     import sys

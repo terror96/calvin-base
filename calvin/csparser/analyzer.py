@@ -16,7 +16,7 @@
 
 import os
 
-from calvin.actorstore.store import ActorStore
+from calvin.actorstore.store import ActorStore, GlobalStore
 from calvin.utilities.calvinlogger import get_logger
 
 
@@ -42,7 +42,7 @@ class Analyzer(object):
     #          for f in actor_def.action_priority:
     #              print f.__name__, [x.cell_contents for x in f.__closure__]
     #
-    def __init__(self, cs_info):
+    def __init__(self, cs_info, verify=True):
         super(Analyzer, self).__init__()
         self.cs_info = cs_info
         self.local_components = cs_info['components'] if 'components' in cs_info else {}
@@ -50,6 +50,7 @@ class Analyzer(object):
         self.app_info = {}
         self.connections = {}
         self.actors = {}
+        self.verify = verify
         self.analyze()
 
 
@@ -111,10 +112,10 @@ class Analyzer(object):
             compdef = self.local_components[actor_type]
             return compdef, False
         found, is_actor, info = ActorStore().lookup(actor_type)
-        if not found:
+        if self.verify and not found:
             msg = 'Actor "{}" not found.'.format(actor_type)
             raise Exception(msg)
-        return info, True
+        return info, is_actor or not found
 
     def add_connection(self, src_actor_port, dst_actor_port):
         if type(dst_actor_port) is list:
@@ -204,8 +205,20 @@ class Analyzer(object):
             qualified_name = namespace+':'+actor_name
 
             if is_actor:
+                # Create the actor signature to be able to look it up in the GlobalStore if neccessary
+                signature_desc={'is_primitive': True,
+                                'actor_type':actor_def['actor_type'],
+                                'inports': [],
+                                'outports': []}
+                for c in structure['connections']:
+                    if actor_name == c['src'] and c['src_port'] not in signature_desc['inports']:
+                        signature_desc['inports'].append(c['src_port'])
+                    elif actor_name == c['dst'] and c['dst_port'] not in signature_desc['outports']:
+                        signature_desc['outports'].append(c['dst_port'])
+                signature = GlobalStore.actor_signature(signature_desc)
                 # Add actor and its arguments to the list of actor instances
-                self.actors[qualified_name] = {'actor_type':actor_def['actor_type'], 'args':args}
+                self.actors[qualified_name] = {'actor_type':actor_def['actor_type'], 'args':args,
+                                               'signature': signature, 'signature_desc': signature_desc}
             else:
                 # Recurse into components
                 # qualified_name constitutes a namespace here
@@ -223,8 +236,8 @@ class Analyzer(object):
 
         return export_in_mappings, export_out_mappings
 
-def generate_app_info(cs_info):
-    a = Analyzer(cs_info)
+def generate_app_info(cs_info, verify=True):
+    a = Analyzer(cs_info, verify=verify)
     return a.app_info
 
 

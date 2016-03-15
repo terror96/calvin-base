@@ -17,9 +17,12 @@
 import pytest
 import uuid
 import logging
+import sys
+import os
+
 from calvin.utilities import calvinlogger
 
-import sys
+_config_pytest = None
 
 # pytest_plugins = "pytest_twisted"
 
@@ -46,6 +49,8 @@ def pytest_runtest_setup(item):
 
 
 def pytest_configure(config):
+    global _config_pytest
+    _config_pytest = config
     filename = config.getoption("logfile")
     if filename:
         calvinlogger.set_file(filename)
@@ -68,11 +73,12 @@ def pytest_configure(config):
         elif level == "ANALYZE":
             calvinlogger.get_logger(module).setLevel(5)
 
-    # TODO: add func to set any argument from here also
-    from calvin.utilities import calvinconfig
-    _conf = calvinconfig.get()
-    _conf.add_section('ARGUMENTS')
-    _conf.set('ARGUMENTS', 'DHT_NETWORK_FILTER', str(uuid.uuid4()))
+    if not os.environ.get('CALVIN_GLOBAL_DHT_NETWORK_FILTER'):
+        # TODO: add func to set any argument from here also
+        from calvin.utilities import calvinconfig
+        _conf = calvinconfig.get()
+        _conf.add_section('ARGUMENTS')
+        _conf.set('ARGUMENTS', 'DHT_NETWORK_FILTER', str(uuid.uuid4()))
 
 @pytest.fixture
 def testarg_actor(request):

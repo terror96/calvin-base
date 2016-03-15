@@ -590,3 +590,47 @@ class Actor(object):
 
     def deployment_add_requirements(self, deploy_reqs, component=None):
         self._deployment_requirements.extend([dict(r, component=component) for r in deploy_reqs])
+
+    def get_deployment_requirements(self):
+        return self._deployment_requirements + (
+                [{'op': 'actor_reqs_match',
+                  'kwargs': {'requires': self.requires},
+                  'type': '+',
+                  'component': self._deployment_requirements[0]['component'] if self._deployment_requirements else None}]
+                if hasattr(self, 'requires') else [])
+
+class ShadowActor(Actor):
+    """A shadow actor try to behave as another actor but don't have any implementation"""
+    def __init__(self, actor_type, name='', allow_invalid_transitions=True, disable_transition_checks=False,
+                 disable_state_checks=False, actor_id=None):
+        self.inport_names = []
+        self.outport_names = []
+        super(ShadowActor, self).__init__(actor_type, name, allow_invalid_transitions=allow_invalid_transitions, 
+                                            disable_transition_checks=disable_transition_checks,
+                                            disable_state_checks=disable_state_checks, actor_id=actor_id)
+
+    @manage(['_shadow_args'])
+    def init(self, **args):
+        self._shadow_args = args
+
+    def create_shadow_port(self, port_name, port_dir, port_id=None):
+        # TODO check if we should create port against meta info
+        if port_dir == "in":
+            self.inport_names.append(port_name)
+            port = actorport.InPort(port_name, self)
+            self.inports[port_name] = port
+        else:
+            self.outport_names.append(port_name)
+            port = actorport.OutPort(port_name, self)
+            self.outports[port_name] = port
+        return port
+
+    def enabled(self):
+        return False
+
+    def get_deployment_requirements(self):
+        return self._deployment_requirements + [{'op': 'shadow_actor_reqs_match',
+                                                 'kwargs': {'signature': self._signature,
+                                                            'shadow_params': self._shadow_args.keys()},
+                                                 'type': '+',
+                                                 'component': None}]
